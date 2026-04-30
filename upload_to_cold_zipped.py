@@ -50,7 +50,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.log_setup import setup_logging  # noqa: E402
 from src.wave_planner import classify_wave  # noqa: E402
+
+# Initialize logging first so even import-time messages land in the file.
+# Mirrors all events to logs/cold_upload.log + console; tqdm bars stay on
+# stderr so they don't fight the logger.
+setup_logging("cold_upload.log")
 
 # ---------------------------------------------------------------- config
 LOCAL_ROOT = Path(r"E:\فضيلة الشيخ أبي حفص\مرئيات")
@@ -142,7 +148,7 @@ def discover_series(root: Path, only_series: str | None,
     if only_series:
         target = root / only_series
         if not target.exists():
-            print(f"ERROR: series not found: {target}", file=sys.stderr)
+            logger.error("series not found: %s", target)
             sys.exit(2)
         return [target]
     series = [p for p in root.iterdir() if p.is_dir()]
@@ -237,7 +243,7 @@ def upload_zip(sftp: paramiko.SFTPClient, ssh: paramiko.SSHClient,
         sftp.put(str(local_zip), remote_part, callback=cb, confirm=True)
     except Exception as e:
         bar.close()
-        print(f"  ! upload failed: {e}", file=sys.stderr)
+        logger.error("  upload failed: %s", e)
         # Best-effort cleanup of the .part on the remote side.
         try:
             sftp.remove(remote_part)
@@ -260,7 +266,7 @@ def upload_zip(sftp: paramiko.SFTPClient, ssh: paramiko.SSHClient,
         try:
             sftp.rename(remote_part, remote_zip)
         except IOError as e:
-            print(f"  ! rename failed: {e}", file=sys.stderr)
+            logger.error("  rename failed: %s", e)
             return "failed"
     return "uploaded"
 
@@ -280,18 +286,22 @@ def main():
                     help="Don't delete the local zip after a successful upload")
     args = ap.parse_args()
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
+    # Logging is already initialized at import time via setup_logging().
+    # CLI args are echoed so each run's log starts with its invocation.
+    logger.info(
+        "args: series=%s wave=%s dry_run=%s max_retries=%s temp_dir=%s "
+        "keep_local_zip=%s",
+        args.series, args.wave, args.dry_run, args.max_retries,
+        args.temp_dir, args.keep_local_zip,
     )
 
     if not LOCAL_ROOT.exists():
-        print(f"ERROR: local root not found: {LOCAL_ROOT}", file=sys.stderr)
+        logger.error("local root not found: %s", LOCAL_ROOT)
         sys.exit(1)
 
     series_dirs = discover_series(LOCAL_ROOT, args.series, args.wave)
     if not series_dirs:
-        print("No series matched.")
+        logger.info("No series matched.")
         return
 
     plans: list[tuple[Path, list[Path], int]] = []
@@ -301,9 +311,11 @@ def main():
         plans.append((sd, videos, total))
 
     grand_total = sum(t for _, _, t in plans)
-    print(f"Series matched: {len(plans)}")
-    print(f"Total source bytes: {grand_total/1e9:.2f} GB across "
-          f"{sum(len(v) for _, v, _ in plans)} videos.")
+    logger.info("Series matched: %d", len(plans))
+    logger.info(
+        "Total source bytes: %.2f GB across %d videos.",
+        grand_total / 1e9, sum(len(v) for _, v, _ in plans),
+    )
 
     if args.dry_run:
         for sd, videos, total in plans:
@@ -311,15 +323,17 @@ def main():
                 w = classify_wave(sd)
             except OSError:
                 w = -1
-            print(f"  [W{w}] {sd.name}  ({len(videos)} files, "
-                  f"{total/1e9:.2f} GB)")
+            logger.info(
+                "  [W%d] %s  (%d files, %.2f GB)",
+                w, sd.name, len(videos), total / 1e9,
+            )
         return
 
     if grand_total == 0:
-        print("All matched series are empty.")
+        logger.info("All matched series are empty.")
         return
 
-    print(f"Connecting to {USER}@{HOST} ...")
+    logger.info("Connecting to %s@%s ...", USER, HOST)
     ssh, sftp = connect()
     remote_mkdirs(sftp, REMOTE_ZIPS_ROOT)
 
@@ -333,11 +347,12 @@ def main():
     try:
         for i, (sd, videos, total_bytes) in enumerate(plans, 1):
             name = sd.name
-            print()
-            print(f"=== [{i}/{len(plans)}] {name} "
-                  f"({len(videos)} files, {total_bytes/1e9:.2f} GB) ===")
+            logger.info(
+                "=== [%d/%d] Uploading series '%s' (%d files, %.2f GB) ===",
+                i, len(plans), name, len(videos), total_bytes / 1e9,
+            )
             if not videos or total_bytes == 0:
-                print("  (no video files — skip)")
+                logger.info("  SKIP %s: no video files", name)
                 continue
 
             remote_zip = f"{REMOTE_ZIPS_ROOT}/{name}.zip"
@@ -350,24 +365,30 @@ def main():
                 expected_high = int((total_bytes + 1024 * len(videos))
                                     * (1.0 + REMOTE_SIZE_TOLERANCE))
                 if expected_low <= rsize <= expected_high:
-                    print(f"  SK already on cold server "
-                          f"({rsize/1e9:.2f} GB)")
+                    logger.info(
+                        "  SKIP %s: already on cold server (%.2f GB)",
+                        name, rsize / 1e9,
+                    )
                     skipped += 1
                     continue
-                print(f"  remote zip size {rsize} doesn't match expected "
-                      f"~{total_bytes} — re-uploading.")
+                logger.warning(
+                    "  remote zip size %d doesn't match expected ~%d — re-uploading.",
+                    rsize, total_bytes,
+                )
 
             local_zip = temp_root / f"{name}.zip"
             zt0 = time.time()
             try:
                 final_size = make_zip_atomic(sd, videos, local_zip, total_bytes)
             except Exception as e:
-                print(f"  ! zip creation failed: {e}", file=sys.stderr)
+                logger.error("  zip creation failed for %s: %s", name, e)
                 failed += 1
                 continue
             zt = time.time() - zt0
-            print(f"  zipped: {final_size/1e9:.2f} GB in {zt:.1f}s "
-                  f"({(final_size/1e6)/max(zt, 1e-3):.1f} MB/s)")
+            logger.info(
+                "  zipped %s: %.2f GB in %.1fs (%.1f MB/s)",
+                name, final_size / 1e9, zt, (final_size / 1e6) / max(zt, 1e-3),
+            )
 
             attempt = 0
             ut0 = time.time()
@@ -377,8 +398,10 @@ def main():
                     result = upload_zip(sftp, ssh, local_zip, remote_zip)
                     break
                 except (paramiko.SSHException, socket.error, EOFError) as e:
-                    print(f"  ! connection error ({e}); attempt "
-                          f"{attempt}/{args.max_retries}", file=sys.stderr)
+                    logger.warning(
+                        "  connection error (%s); attempt %d/%d",
+                        e, attempt, args.max_retries,
+                    )
                     if attempt >= args.max_retries:
                         result = "failed"
                         break
@@ -394,17 +417,18 @@ def main():
                 uploaded += 1
                 bytes_uploaded += final_size
                 mbps = (final_size / 1e6) / max(ut, 1e-3)
-                print(f"  UP uploaded {final_size/1e9:.2f} GB in {ut:.1f}s "
-                      f"({mbps:.2f} MB/s)")
+                logger.info(
+                    "  === Done: %s — uploaded %.2f GB in %.1fs (%.2f MB/s) ===",
+                    name, final_size / 1e9, ut, mbps,
+                )
                 if not args.keep_local_zip:
                     try:
                         local_zip.unlink()
                     except OSError as e:
-                        print(f"  warn: couldn't delete local zip: {e}",
-                              file=sys.stderr)
+                        logger.warning("  couldn't delete local zip: %s", e)
             else:
                 failed += 1
-                print(f"  FAIL upload of {name}")
+                logger.error("  FAIL upload of %s", name)
                 # Leave the local zip behind so a re-run can pick it up.
     finally:
         try: sftp.close()
@@ -413,12 +437,17 @@ def main():
         except Exception: pass
 
     elapsed = time.time() - t0
-    print()
-    print(f"=== Done in {elapsed/60:.1f} min ===")
-    print(f"Uploaded: {uploaded}, Skipped: {skipped}, Failed: {failed}")
+    logger.info("=== Done in %.1f min ===", elapsed / 60)
+    logger.info(
+        "Final summary — Uploaded: %d, Skipped: %d, Failed: %d",
+        uploaded, skipped, failed,
+    )
     if bytes_uploaded:
-        print(f"Transferred: {bytes_uploaded/1e9:.2f} GB "
-              f"({(bytes_uploaded/1e6)/max(elapsed, 1):.2f} MB/s avg)")
+        logger.info(
+            "Transferred: %.2f GB (%.2f MB/s avg)",
+            bytes_uploaded / 1e9,
+            (bytes_uploaded / 1e6) / max(elapsed, 1),
+        )
     if failed:
         sys.exit(3)
 

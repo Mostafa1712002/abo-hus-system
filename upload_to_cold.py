@@ -13,6 +13,7 @@ Usage (from project venv):
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import socket
 import stat
@@ -29,6 +30,18 @@ try:
     sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
 except Exception:
     pass
+
+# Make `from src...` imports work when run from project root.
+PROJECT_ROOT = Path(__file__).resolve().parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.log_setup import setup_logging  # noqa: E402
+
+# Both cold uploaders write to the same log file so the operator has a
+# single chronological audit trail of "what hit the cold server today".
+setup_logging("cold_upload.log")
+logger = logging.getLogger("upload_to_cold")
 
 # ---------------------------------------------------------------- config
 LOCAL_ROOT = Path(r"E:\فضيلة الشيخ أبي حفص\مرئيات")
@@ -78,7 +91,7 @@ def collect_files(root: Path, only_series: str | None) -> list[Path]:
     if only_series:
         target = root / only_series
         if not target.exists():
-            print(f"ERROR: series not found: {target}", file=sys.stderr)
+            logger.error("series not found: %s", target)
             sys.exit(2)
         candidates = [p for p in target.rglob("*") if p.is_file()]
     else:
@@ -105,7 +118,7 @@ def upload_one(sftp: paramiko.SFTPClient, ssh: paramiko.SSHClient,
         sftp.put(str(local), remote, callback=cb, confirm=True)
     except Exception as e:
         bar.close()
-        print(f"  ! upload failed: {e}", file=sys.stderr)
+        logger.error("  upload failed: %s", e)
         return "failed"
     bar.close()
     return "uploaded"
@@ -119,26 +132,34 @@ def main():
     ap.add_argument("--max-retries", type=int, default=3)
     args = ap.parse_args()
 
+    logger.info(
+        "args: series=%s dry_run=%s max_retries=%s",
+        args.series, args.dry_run, args.max_retries,
+    )
+
     if not LOCAL_ROOT.exists():
-        print(f"ERROR: local root not found: {LOCAL_ROOT}", file=sys.stderr)
+        logger.error("local root not found: %s", LOCAL_ROOT)
         sys.exit(1)
 
     files = collect_files(LOCAL_ROOT, args.series)
     files.sort()
     total_bytes = sum(p.stat().st_size for p in files)
-    print(f"Found {len(files)} video files. Total {total_bytes / 1e9:.2f} GB.")
+    logger.info(
+        "Found %d video files. Total %.2f GB.",
+        len(files), total_bytes / 1e9,
+    )
     if not files:
         return
 
     if args.dry_run:
         for p in files[:20]:
             rel = p.relative_to(LOCAL_ROOT)
-            print(f"  {rel}  ({p.stat().st_size / 1e6:.1f} MB)")
+            logger.info("  %s  (%.1f MB)", rel, p.stat().st_size / 1e6)
         if len(files) > 20:
-            print(f"  ... and {len(files) - 20} more")
+            logger.info("  ... and %d more", len(files) - 20)
         return
 
-    print(f"Connecting to {USER}@{HOST} ...")
+    logger.info("Connecting to %s@%s ...", USER, HOST)
     ssh, sftp = connect()
     remote_mkdirs(sftp, REMOTE_ROOT)
 
@@ -158,8 +179,10 @@ def main():
                     result = upload_one(sftp, ssh, p, remote, sz)
                     break
                 except (paramiko.SSHException, socket.error, EOFError) as e:
-                    print(f"  ! connection error ({e}); attempt {attempt}/{args.max_retries}",
-                          file=sys.stderr)
+                    logger.warning(
+                        "  connection error (%s); attempt %d/%d",
+                        e, attempt, args.max_retries,
+                    )
                     if attempt >= args.max_retries:
                         result = "failed"
                         break
@@ -173,8 +196,10 @@ def main():
             tag = {"uploaded": "UP", "skipped": "SK", "failed": "FAIL"}[result]
             elapsed = max(time.time() - t0, 1e-3)
             mbps = (bytes_done / 1e6) / elapsed if bytes_done else 0
-            print(f"[{i}/{len(files)}] {tag} {rel}  ({sz/1e6:.1f} MB) "
-                  f"avg {mbps:.2f} MB/s")
+            logger.info(
+                "[%d/%d] %s %s  (%.1f MB) avg %.2f MB/s",
+                i, len(files), tag, rel, sz / 1e6, mbps,
+            )
 
             if result == "uploaded":
                 uploaded += 1
@@ -190,11 +215,15 @@ def main():
         except Exception: pass
 
     elapsed = time.time() - t0
-    print()
-    print(f"=== Done in {elapsed/60:.1f} min ===")
-    print(f"Uploaded: {uploaded}, Skipped: {skipped}, Failed: {failed}")
-    print(f"Transferred: {bytes_done/1e9:.2f} GB "
-          f"({(bytes_done/1e6)/max(elapsed,1):.2f} MB/s avg)")
+    logger.info("=== Done in %.1f min ===", elapsed / 60)
+    logger.info(
+        "Final summary — Uploaded: %d, Skipped: %d, Failed: %d",
+        uploaded, skipped, failed,
+    )
+    logger.info(
+        "Transferred: %.2f GB (%.2f MB/s avg)",
+        bytes_done / 1e9, (bytes_done / 1e6) / max(elapsed, 1),
+    )
     if failed:
         sys.exit(3)
 

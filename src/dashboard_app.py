@@ -42,6 +42,24 @@ TEMPLATES_DIR = PROJECT_ROOT / "templates"
 STATIC_DIR = PROJECT_ROOT / "static"
 CONFIG_PATH = PROJECT_ROOT / "config.json"
 
+# Server-side logs (cron + systemd) live under /var/log on the production
+# server. On Windows / dev machines this directory simply won't exist and
+# we silently skip it.
+SERVER_LOGS_DIR = Path("/var/log")
+SERVER_LOG_GLOB = "abuhafs-*.log"
+
+# Local logs the dashboard knows about. Order matters — the UI renders
+# them top-to-bottom in this exact sequence so the most-watched files are
+# above the fold.
+LOCAL_LOG_NAMES = (
+    "uploader.log",
+    "cold_upload.log",
+    "transcode.log",
+    "sync_ops.log",
+    "setup.log",
+    "process_check.log",
+)
+
 
 # --- App --------------------------------------------------------------------
 app = FastAPI(
@@ -433,6 +451,153 @@ async def api_logs(
         "process_check": _tail(PROCESS_LOG, n),
         "uploader": _tail(UPLOADER_LOG, n),
         "n": n,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def _resolve_log_path(name: str) -> Optional[Path]:
+    """Resolve a log filename to a real path under either logs/ or /var/log.
+
+    Hardened against directory-traversal: only the bare filename is taken
+    (no slashes accepted), and the resolved path must live inside one of
+    the two known log directories. ``None`` is returned for anything we
+    don't recognize so the caller can return 404.
+    """
+    if not name or "/" in name or "\\" in name or name.startswith("."):
+        return None
+    # Local logs first.
+    p = (LOGS_DIR / name).resolve()
+    try:
+        p.relative_to(LOGS_DIR.resolve())
+        if p.exists():
+            return p
+    except ValueError:
+        return None
+    # Server logs — only allow the abuhafs-* pattern.
+    if SERVER_LOGS_DIR.exists() and name.startswith("abuhafs-") and name.endswith(".log"):
+        sp = (SERVER_LOGS_DIR / name).resolve()
+        try:
+            sp.relative_to(SERVER_LOGS_DIR.resolve())
+            if sp.exists():
+                return sp
+        except ValueError:
+            return None
+    return None
+
+
+def _list_log_files() -> list[dict]:
+    """Return metadata for every log file the dashboard knows about.
+
+    Each entry: ``{"name", "path", "size", "mtime", "exists"}``. The
+    ordering is: local logs (in ``LOCAL_LOG_NAMES`` order) followed by any
+    ``/var/log/abuhafs-*.log`` discovered on the server.
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    for name in LOCAL_LOG_NAMES:
+        p = LOGS_DIR / name
+        seen.add(name)
+        st = None
+        if p.exists():
+            try:
+                st = p.stat()
+            except OSError:
+                st = None
+        out.append({
+            "name": name,
+            "path": str(p),
+            "size": st.st_size if st else 0,
+            "mtime": (
+                datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds")
+                if st else ""
+            ),
+            "exists": st is not None,
+            "scope": "local",
+        })
+
+    # Pick up any extra local logs we don't know by name (so future log
+    # files appear without code changes).
+    if LOGS_DIR.exists():
+        try:
+            extras = sorted(p for p in LOGS_DIR.iterdir()
+                            if p.is_file() and p.suffix == ".log"
+                            and p.name not in seen)
+        except OSError:
+            extras = []
+        for p in extras:
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            out.append({
+                "name": p.name,
+                "path": str(p),
+                "size": st.st_size,
+                "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
+                "exists": True,
+                "scope": "local",
+            })
+
+    # Server-side logs (only on the production deployment).
+    if SERVER_LOGS_DIR.exists():
+        try:
+            srv = sorted(SERVER_LOGS_DIR.glob(SERVER_LOG_GLOB))
+        except OSError:
+            srv = []
+        for p in srv:
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            out.append({
+                "name": p.name,
+                "path": str(p),
+                "size": st.st_size,
+                "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
+                "exists": True,
+                "scope": "server",
+            })
+
+    return out
+
+
+@app.get("/api/logs/{name}")
+async def api_log_one(
+    name: str,
+    n: int = Query(200, ge=1, le=10000),
+    user: User = Depends(current_user),
+):
+    """Return the last `n` lines of the named log file.
+
+    Accepts either a bare local log filename (``cold_upload.log``) or a
+    server log filename (``abuhafs-process.log``). Returns 404 for unknown
+    or path-traversing names.
+    """
+    p = _resolve_log_path(name)
+    if p is None:
+        raise HTTPException(status_code=404, detail=f"unknown log: {name}")
+    try:
+        st = p.stat()
+        size = st.st_size
+        mtime = datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds")
+    except OSError:
+        size, mtime = 0, ""
+    return {
+        "name": name,
+        "lines": _tail(p, n),
+        "size": size,
+        "mtime": mtime,
+        "n": n,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+@app.get("/api/logs-list")
+async def api_logs_list(user: User = Depends(current_user)):
+    """List every log file the dashboard can show, with size + mtime."""
+    return {
+        "logs": _list_log_files(),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
 
@@ -903,6 +1068,89 @@ async def partial_logs(
         <div class="logbox">{render(uploader)}</div>
       </div>
     </div>
+    """)
+
+
+# --- Logs Hub ---------------------------------------------------------------
+def _human_size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
+def _render_log_lines(lines: list[str]) -> str:
+    """Color-code log lines: errors red, success green, ts greyed."""
+    if not lines:
+        return '<div class="text-slate-500 text-xs">لا توجد سطور.</div>'
+    out = []
+    for ln in lines:
+        t = ln.rstrip("\n")
+        cls = ""
+        low = t.lower()
+        if "error" in low or "failed" in low or "traceback" in low or "[error]" in low:
+            cls = "err"
+        elif (
+            "completed" in low or " ok " in low or "success" in low
+            or "uploaded" in low or "=== done" in low
+        ):
+            cls = "ok"
+        out.append(
+            f'<div class="{cls}">{_esc(t)}</div>'
+            if cls else f'<div>{_esc(t)}</div>'
+        )
+    return "".join(out)
+
+
+@app.get("/logs", response_class=HTMLResponse)
+async def logs_hub(request: Request, user: User = Depends(current_user)):
+    """Logs Hub — collapsible sections, one per log file, auto-refresh.
+
+    The page itself is static; each section pulls its own tail via HTMX
+    so we can refresh them on independent cadences without re-rendering
+    everything at once.
+    """
+    return templates.TemplateResponse(
+        request,
+        "logs_hub.html",
+        {
+            "now": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "channel_name": "قناة الشيخ سامي العربي",
+            "user_name": user.name or user.email,
+            "user_email": user.email,
+            "logs": _list_log_files(),
+        },
+    )
+
+
+@app.get("/partials/log/{name}", response_class=HTMLResponse, include_in_schema=False)
+async def partial_log_one(
+    name: str,
+    n: int = Query(120, ge=1, le=5000),
+    user: User = Depends(current_user),
+):
+    """HTMX partial: header (size+mtime) + tail of one log."""
+    p = _resolve_log_path(name)
+    if p is None:
+        return HTMLResponse(
+            f'<div class="text-slate-500 text-xs">'
+            f'الملف غير موجود: {_esc(name)}'
+            f'</div>'
+        )
+    try:
+        st = p.stat()
+        size = _human_size(st.st_size)
+        mtime = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+    except OSError:
+        size, mtime = "?", "?"
+    lines = _tail(p, n)
+    return HTMLResponse(f"""
+    <div class="flex items-center justify-between text-xs text-slate-400 mb-2">
+      <div>{_esc(str(p))}</div>
+      <div>{_esc(size)} · آخر تحديث: {_esc(mtime)}</div>
+    </div>
+    <div class="logbox">{_render_log_lines(lines)}</div>
     """)
 
 

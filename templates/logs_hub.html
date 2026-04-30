@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>السجلات — {{ channel_name }}</title>
+
+  <!-- Tailwind via CDN (zero-build) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- HTMX for live updates -->
+  <script src="https://unpkg.com/htmx.org@1.9.12" defer></script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <style>
+    :root {
+      --navy: #0E1B2C;
+      --navy-2: #122339;
+      --navy-3: #1B3252;
+      --gold: #D4AF37;
+      --gold-soft: #E9C964;
+      --soft: #F8F8F8;
+      --line: rgba(255,255,255,0.08);
+    }
+    html, body {
+      background: var(--navy);
+      color: var(--soft);
+      font-family: 'Cairo', system-ui, -apple-system, "Segoe UI", Tahoma, Arial, sans-serif;
+      font-feature-settings: "ss01", "ss02";
+    }
+    .card {
+      background: linear-gradient(180deg, var(--navy-2), var(--navy));
+      border: 1px solid var(--line);
+      border-radius: 14px;
+    }
+    .gold { color: var(--gold); }
+    .badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 2px 10px; border-radius: 999px;
+      font-size: 12px; font-weight: 600;
+      border: 1px solid var(--line);
+    }
+    .dot { width: 8px; height: 8px; border-radius: 999px; display: inline-block; }
+    .dot-green   { background: #22c55e; }
+    .dot-blue    { background: #3b82f6; }
+    .dot-yellow  { background: #eab308; }
+    .dot-red     { background: #ef4444; }
+    .dot-gray    { background: #94a3b8; }
+
+    /* Logs box */
+    .logbox {
+      background: #0a1422; color: #cbd5e1;
+      font-family: ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+      font-size: 12.5px; line-height: 1.55;
+      border-radius: 10px; border: 1px solid var(--line);
+      padding: 12px; max-height: 480px; overflow: auto;
+      direction: ltr; text-align: left;
+    }
+    .logbox .ts { color: #64748b; }
+    .logbox .err { color: #fca5a5; }
+    .logbox .ok { color: #86efac; }
+
+    .gold-divider {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(212,175,55,0.45), transparent);
+    }
+
+    .logout-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      padding: 6px 12px; border-radius: 8px; font-size: 12.5px; font-weight: 600;
+      border: 1px solid var(--line); background: rgba(255,255,255,0.03);
+      color: #e2e8f0;
+      transition: 0.15s;
+    }
+    .logout-btn:hover {
+      background: rgba(239, 68, 68, 0.15); color: #fecaca;
+      border-color: rgba(239,68,68,0.45);
+    }
+
+    /* Collapsible details */
+    details.log-section {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: linear-gradient(180deg, var(--navy-2), var(--navy));
+      margin-bottom: 12px;
+    }
+    details.log-section summary {
+      padding: 14px 18px;
+      cursor: pointer;
+      font-weight: 600;
+      list-style: none;
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px;
+    }
+    details.log-section summary::-webkit-details-marker { display: none; }
+    details.log-section[open] summary {
+      border-bottom: 1px solid var(--line);
+    }
+    details.log-section .body { padding: 14px 18px 18px; }
+
+    .scope-badge {
+      font-size: 10.5px; padding: 2px 8px; border-radius: 999px;
+      border: 1px solid var(--line);
+    }
+    .scope-local  { color: #93c5fd; }
+    .scope-server { color: #fcd34d; }
+    .missing { opacity: 0.55; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: rgba(212,175,55,0.25); border-radius: 999px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+  </style>
+</head>
+<body class="min-h-screen">
+
+  {% include "_nav.html" %}
+
+  <header class="border-b" style="border-color: var(--line); background: var(--navy-2);">
+    <div class="max-w-7xl mx-auto px-6 py-5 flex items-center justify-between gap-4 flex-wrap">
+      <div class="flex items-center gap-4">
+        <div>
+          <h1 class="text-xl md:text-2xl font-bold gold leading-tight">
+            السجلات — Logs Hub
+          </h1>
+          <div class="text-xs text-slate-400 mt-1">
+            عرض مباشر لكل ملفات السجل المحلية وملفات السيرفر — يتجدد تلقائياً كل 10 ثوانٍ
+          </div>
+        </div>
+      </div>
+      <div class="text-left flex items-center gap-4">
+        <div>
+          <div class="text-base font-semibold gold tracking-wide">{{ now }}</div>
+          <div class="text-xs text-slate-400 mt-1">آخر تحميل للصفحة</div>
+        </div>
+        {% if user_name %}
+        <div class="flex items-center gap-2 pr-3 border-r" style="border-color: var(--line);">
+          <div class="text-right">
+            <div class="text-sm font-semibold">{{ user_name }}</div>
+            <div class="text-xs text-slate-500" dir="ltr">{{ user_email }}</div>
+          </div>
+          <a href="/logout" class="logout-btn" title="تسجيل الخروج">خروج</a>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+    <div class="gold-divider"></div>
+  </header>
+
+  <main class="max-w-7xl mx-auto px-6 py-6">
+
+    {% if not logs %}
+      <div class="card p-6 text-center text-slate-400">
+        لا توجد ملفات سجل بعد.
+      </div>
+    {% endif %}
+
+    {% for lg in logs %}
+      <details class="log-section{% if not lg.exists %} missing{% endif %}"
+               {% if loop.first or lg.scope == 'server' %}open{% endif %}>
+        <summary>
+          <div class="flex items-center gap-3 min-w-0">
+            <span class="dot {% if lg.scope == 'server' %}dot-yellow{% else %}dot-blue{% endif %}"></span>
+            <span class="font-mono text-sm">{{ lg.name }}</span>
+            <span class="scope-badge {% if lg.scope == 'server' %}scope-server{% else %}scope-local{% endif %}">
+              {% if lg.scope == 'server' %}سيرفر{% else %}محلي{% endif %}
+            </span>
+            {% if not lg.exists %}
+              <span class="text-xs text-slate-500">(غير موجود بعد)</span>
+            {% endif %}
+          </div>
+          <div class="text-xs text-slate-500 flex items-center gap-4 flex-shrink-0">
+            {% if lg.exists %}
+              <span dir="ltr">{{ (lg.size / 1024) | round(1) }} KB</span>
+              <span dir="ltr">{{ lg.mtime }}</span>
+            {% endif %}
+            <span class="text-slate-600">▾</span>
+          </div>
+        </summary>
+        <div class="body">
+          <div id="log-{{ loop.index }}"
+               hx-get="/partials/log/{{ lg.name }}?n=120"
+               hx-trigger="load{% if lg.exists %}, every 10s{% endif %}"
+               hx-swap="innerHTML">
+            <div class="text-slate-400 text-xs">جارٍ التحميل…</div>
+          </div>
+        </div>
+      </details>
+    {% endfor %}
+
+    <footer class="text-center text-xs text-slate-500 py-6 mt-4">
+      السجلات — قناة الشيخ سامي العربي
+    </footer>
+  </main>
+
+</body>
+</html>

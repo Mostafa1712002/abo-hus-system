@@ -33,6 +33,15 @@ try:
 except Exception:
     pass
 
+# Make `from src...` imports work when run from project root.
+PROJECT_ROOT = Path(__file__).resolve().parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.log_setup import setup_logging  # noqa: E402
+
+setup_logging("transcode.log")
+
 # ---------------------------------------------------------------- config
 LOCAL_ROOT = Path(r"E:\فضيلة الشيخ أبي حفص\مرئيات")
 SOURCE_EXTS = {".rmvb", ".rm"}
@@ -101,11 +110,13 @@ def already_transcoded(src: Path) -> Path | None:
     return target if target.exists() else None
 
 
-def transcode_one(src: Path, dst: Path) -> tuple[bool, str]:
+def transcode_one(src: Path, dst: Path) -> tuple[bool, str, int]:
     """Run ffmpeg to produce ``dst`` from ``src`` atomically.
 
     Writes to ``dst.tmp`` first, then ``os.replace`` to ``dst`` on success.
-    Returns ``(ok, message)``.
+    Returns ``(ok, message, returncode)``. The returncode is 0 on success
+    or whatever ffmpeg exited with on failure; ``-1`` is reserved for
+    pre-flight failures (binary missing, output empty, rename fails).
     """
     tmp = dst.with_suffix(dst.suffix + ".tmp")
     if tmp.exists():
@@ -138,6 +149,7 @@ def transcode_one(src: Path, dst: Path) -> tuple[bool, str]:
         "-f", "mp4",  # tmp filename ends in .tmp; force mp4 muxer explicitly
         str(tmp),
     ]
+    logger.debug("ffmpeg cmd: %s", " ".join(cmd))
     try:
         proc = subprocess.run(
             cmd,
@@ -153,22 +165,25 @@ def transcode_one(src: Path, dst: Path) -> tuple[bool, str]:
                 tmp.unlink()
         except OSError:
             pass
-        tail = (e.stdout or "").splitlines()[-10:]
-        return False, "ffmpeg failed:\n" + "\n".join(tail)
+        # Last 500 chars of merged stderr/stdout — enough to see the
+        # actual ffmpeg error without spamming the log.
+        full = (e.stdout or "")
+        tail500 = full[-500:]
+        return False, "ffmpeg failed (rc=%d): %s" % (e.returncode, tail500), e.returncode
     except FileNotFoundError as e:
-        return False, str(e)
+        return False, str(e), -1
 
     if not tmp.exists() or tmp.stat().st_size == 0:
-        return False, "ffmpeg produced no output"
+        return False, "ffmpeg produced no output", -1
 
     # Atomic publish.
     try:
         os.replace(tmp, dst)
     except OSError as e:
-        return False, f"rename failed: {e}"
+        return False, f"rename failed: {e}", -1
 
     _ = proc  # quiet linters
-    return True, "ok"
+    return True, "ok", 0
 
 
 def ffprobe_summary(path: Path) -> str:
@@ -210,35 +225,36 @@ def main() -> int:
                     help="(default) Keep the original .rmvb/.rm next to the .mp4")
     args = ap.parse_args()
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
+    # Logging is initialized at import time via setup_logging().
+    logger.info(
+        "args: series=%s all=%s file=%s dry_run=%s delete_rmvb=%s",
+        args.series, args.all, args.file, args.dry_run, args.delete_rmvb,
     )
 
     # --- discover sources
     if args.file:
         src_path = Path(args.file)
         if not src_path.exists():
-            print(f"ERROR: file not found: {src_path}", file=sys.stderr)
+            logger.error("file not found: %s", src_path)
             return 2
         if src_path.suffix.lower() not in SOURCE_EXTS:
-            print(f"ERROR: not a .rmvb/.rm file: {src_path}", file=sys.stderr)
+            logger.error("not a .rmvb/.rm file: %s", src_path)
             return 2
         sources = [src_path]
     elif args.series:
         target = LOCAL_ROOT / args.series
         if not target.exists():
-            print(f"ERROR: series not found: {target}", file=sys.stderr)
+            logger.error("series not found: %s", target)
             return 2
         sources = discover_sources(target)
     else:  # --all
         if not LOCAL_ROOT.exists():
-            print(f"ERROR: local root not found: {LOCAL_ROOT}", file=sys.stderr)
+            logger.error("local root not found: %s", LOCAL_ROOT)
             return 2
         sources = discover_sources(LOCAL_ROOT)
 
     if not sources:
-        print("No .rmvb/.rm files found.")
+        logger.info("No .rmvb/.rm files found.")
         return 0
 
     # --- plan
@@ -252,26 +268,29 @@ def main() -> int:
         else:
             todo.append(s)
 
-    print(f"Found {len(sources)} .rmvb/.rm file(s) "
-          f"({total_src_bytes/1e9:.2f} GB total source).")
-    print(f"  to transcode: {len(todo)}")
-    print(f"  already have .mp4 sibling: {len(skipped)}")
+    logger.info(
+        "Found %d .rmvb/.rm file(s) (%.2f GB total source).",
+        len(sources), total_src_bytes / 1e9,
+    )
+    logger.info("  to transcode: %d", len(todo))
+    logger.info("  already have .mp4 sibling: %d", len(skipped))
     if args.dry_run:
-        print()
-        print(f"DRY RUN — would create {len(todo)} mp4 file(s):")
+        logger.info("DRY RUN — would create %d mp4 file(s):", len(todo))
         for s in todo:
-            print(f"  {s.relative_to(LOCAL_ROOT)}  ->  "
-                  f"{s.with_suffix(TARGET_EXT).name}  "
-                  f"({s.stat().st_size/1e6:.1f} MB src)")
+            logger.info(
+                "  %s  ->  %s  (%.1f MB src)",
+                s.relative_to(LOCAL_ROOT),
+                s.with_suffix(TARGET_EXT).name,
+                s.stat().st_size / 1e6,
+            )
         if skipped:
-            print()
-            print(f"Already transcoded ({len(skipped)}):")
+            logger.info("Already transcoded (%d):", len(skipped))
             for s in skipped:
-                print(f"  {s.relative_to(LOCAL_ROOT)}")
+                logger.info("  %s", s.relative_to(LOCAL_ROOT))
         return 0
 
     if not todo:
-        print("Nothing to do — every source already has a .mp4 sibling.")
+        logger.info("Nothing to do — every source already has a .mp4 sibling.")
         return 0
 
     # --- transcode loop
@@ -285,40 +304,50 @@ def main() -> int:
         dst = src.with_suffix(TARGET_EXT)
         in_size = src.stat().st_size
         bar.set_postfix_str(src.name[:40])
+        logger.info(
+            "=== Transcoding '%s' (%.1f MB input) ===",
+            src.name, in_size / 1e6,
+        )
         st = time.time()
-        ok, msg = transcode_one(src, dst)
+        ok, msg, rc = transcode_one(src, dst)
         dt = time.time() - st
         if ok:
             out_size = dst.stat().st_size
             bytes_in += in_size
             bytes_out += out_size
             ok_count += 1
-            tqdm.write(
-                f"  OK  {src.name}: {in_size/1e6:.1f} MB -> "
-                f"{out_size/1e6:.1f} MB in {dt:.1f}s"
+            logger.info(
+                "  OK %s: %.1f MB -> %.1f MB in %.1fs (rc=%d)",
+                src.name, in_size / 1e6, out_size / 1e6, dt, rc,
             )
             if args.delete_rmvb:
                 # Verify the output looks sane before deleting source.
                 try:
                     if out_size > 0:
                         src.unlink()
-                        tqdm.write(f"      removed source {src.name}")
+                        logger.info("      removed source %s", src.name)
                 except OSError as e:
-                    tqdm.write(f"      warn: couldn't delete source: {e}")
+                    logger.warning("      couldn't delete source: %s", e)
         else:
             fail_count += 1
-            tqdm.write(f"  FAIL {src.name}: {msg}")
+            logger.error(
+                "  FAIL %s after %.1fs (rc=%d): %s",
+                src.name, dt, rc, msg,
+            )
         bar.update(1)
     bar.close()
 
     elapsed = time.time() - t0
-    print()
-    print(f"=== Done in {elapsed/60:.1f} min ===")
-    print(f"Transcoded: {ok_count} OK, {fail_count} failed.")
+    logger.info("=== Done in %.1f min ===", elapsed / 60)
+    logger.info(
+        "Transcoded: %d OK, %d failed.", ok_count, fail_count,
+    )
     if bytes_in:
-        print(f"Source bytes: {bytes_in/1e9:.2f} GB  ->  "
-              f"Output bytes: {bytes_out/1e9:.2f} GB "
-              f"({100*bytes_out/max(bytes_in, 1):.0f}% of source).")
+        logger.info(
+            "Source bytes: %.2f GB  ->  Output bytes: %.2f GB (%.0f%% of source).",
+            bytes_in / 1e9, bytes_out / 1e9,
+            100 * bytes_out / max(bytes_in, 1),
+        )
     return 0 if fail_count == 0 else 3
 
 
