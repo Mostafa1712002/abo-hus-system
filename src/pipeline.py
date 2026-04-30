@@ -76,6 +76,153 @@ _TELEGRAM_HASHTAGS = [
     "#إسلاميات",
 ]
 
+# ===== Brand hashtags لـ Facebook =====
+# هاشتاجز ثابتة بتظهر في كل منشور على Facebook (main video + Reels)
+# عشان كل محتوى القناة يبقى متربط ومكتشف من خلال نفس الهاشتاجز.
+FB_BRAND_HASHTAGS = [
+    "#الشيخ_سامي_العربي",
+    "#أبو_حفص_الأثري",
+    "#علم_شرعي",
+    "#دروس_شرعية",
+    "#السلف_الصالح",
+    "#إسلاميات",
+    "#نقال_الخير",
+    "#أهل_السنة_والجماعة",
+]
+
+# هاشتاجز Reels — نفس الـ brand + اضافات للاكتشاف
+FB_REEL_HASHTAGS = FB_BRAND_HASHTAGS + ["#Reels", "#Shorts", "#إسلام", "#فقه"]
+
+
+def _build_fb_main_description(title: str, body: str, series: str = "",
+                               next_video_teaser: str = "") -> str:
+    """يبني وصف الفيديو الكامل على Facebook Page.
+
+    لا يحتوي على رابط YouTube — المستخدم عاوز المشاهدين يتفاعلوا
+    مع الفيديو على FB نفسه مش يتنقلوا ليوتيوب.
+
+    الفورمات:
+        {body}
+
+        🌟 ترقبوا قريباً: {next_video_teaser}        ← لو متاح
+        📚 تابعوا سلسلة "{series}" والمزيد من دروس فضيلة الشيخ على صفحتنا.
+
+        {brand_hashtags}
+
+    ملحوظة: FB Page video descriptions ما بتدعمش HTML tags (`<b>` … إلخ)،
+    فبنستخدم plain text + emojis + line breaks فقط.
+    """
+    body_clean = (body or "").strip()
+    series_clean = (series or "").strip()
+    teaser_clean = (next_video_teaser or "").strip()
+
+    parts: list[str] = []
+    if body_clean:
+        parts.append(body_clean)
+    if teaser_clean:
+        parts.append("")
+        parts.append(f"🌟 ترقبوا قريباً: {teaser_clean}")
+    parts.append("")
+    if series_clean:
+        parts.append(
+            f"📚 تابعوا سلسلة \"{series_clean}\" والمزيد من دروس فضيلة الشيخ "
+            f"على صفحتنا، وكونوا أول من يصلكم الجديد."
+        )
+    else:
+        parts.append(
+            "📚 تابعوا المزيد من دروس فضيلة الشيخ على صفحتنا، "
+            "وكونوا أول من يصلكم الجديد."
+        )
+    parts.append("")
+    parts.append(" ".join(FB_BRAND_HASHTAGS))
+    return "\n".join(parts).strip()
+
+
+def _build_fb_reel_description(short_description: str, series: str = "",
+                               next_video_teaser: str = "") -> str:
+    """يبني وصف Reel على Facebook Page.
+
+    لا يحتوي على رابط YouTube — مزيد من التفاعل على المنصة نفسها.
+
+    الفورمات:
+        {short_description}
+
+        ⚡ من سلسلة "{series}"
+
+        🌟 ترقبوا قريباً: {next_video_teaser}        ← لو متاح
+
+        {brand_hashtags}
+    """
+    desc_clean = (short_description or "").strip()
+    series_clean = (series or "").strip()
+    teaser_clean = (next_video_teaser or "").strip()
+
+    parts: list[str] = []
+    if desc_clean:
+        parts.append(desc_clean)
+    if series_clean:
+        parts.append("")
+        parts.append(f"⚡ من سلسلة \"{series_clean}\"")
+    if teaser_clean:
+        parts.append("")
+        parts.append(f"🌟 ترقبوا قريباً: {teaser_clean}")
+    parts.append("")
+    parts.append(" ".join(FB_REEL_HASHTAGS))
+    return "\n".join(parts).strip()
+
+
+def _compute_next_teaser(cfg: Config, current_video_path: Path,
+                        series: str) -> str:
+    """يحسب السطر التشويقي للفيديو القادم في نفس السلسلة.
+
+    - بنبص في الـ videos_input/series ونرتب الملفات natural sort.
+    - لو لقينا الـ index الحالي، الفيديو اللي بعده هو التشويق.
+    - لو الفيديو الحالي هو الأخير أو حصل أي خطأ، بنرجع نص عام.
+
+    Returns:
+        نص قصير صالح للنشر (مثال: 'حلقة جديدة من "..." — ...').
+    """
+    series_clean = (series or "").strip()
+    fallback = (
+        f"حلقة جديدة من سلسلة \"{series_clean}\" قريباً بإذن الله"
+        if series_clean else "مزيد من الدروس قريباً بإذن الله"
+    )
+    try:
+        from .wave_planner import find_videos_in_series
+        if not series_clean:
+            return fallback
+        videos_input = cfg.paths.get("videos_input", "")
+        if not videos_input:
+            return fallback
+        series_dir = Path(videos_input) / series_clean
+        if not series_dir.exists():
+            return fallback
+        videos = find_videos_in_series(series_dir)
+        if not videos:
+            return fallback
+        # نحاول نلاقي الفيديو الحالي
+        current = Path(current_video_path)
+        idx = -1
+        for i, v in enumerate(videos):
+            try:
+                if v.resolve() == current.resolve():
+                    idx = i
+                    break
+            except Exception:
+                if v.name == current.name:
+                    idx = i
+                    break
+        if idx < 0:
+            return fallback
+        if idx + 1 < len(videos):
+            next_name = videos[idx + 1].stem
+            return f"حلقة جديدة من \"{series_clean}\" — {next_name}"
+        # آخر فيديو في السلسلة
+        return f"ختام سلسلة \"{series_clean}\" قريباً وسلاسل جديدة في الطريق"
+    except Exception as e:
+        logger.debug(f"_compute_next_teaser: {e}")
+    return fallback
+
 
 def _get_meta_creds(cfg: Config) -> dict | None:
     """يحمّل meta_credentials.json مرة واحدة. بيرجع None لو فشل."""
@@ -199,7 +346,8 @@ def _get_telegram_creds(cfg: Config) -> dict | None:
 def _publish_full_video_to_telegram(cfg: Config, video_path: Path,
                                     title: str, description: str,
                                     yt_url: str | None = None,
-                                    series: str = "") -> int | None:
+                                    series: str = "",
+                                    next_video_teaser: str = "") -> int | None:
     """ينشر منشور نصي على تليجرام يعلن المحاضرة الجديدة + رابط يوتيوب.
 
     ⚠️ ملاحظة مهمة: المحاضرات الكاملة عادةً > 50MB، وهو حد الـ Bot API الرسمي،
@@ -234,6 +382,7 @@ def _publish_full_video_to_telegram(cfg: Config, video_path: Path,
 
         text = _build_full_video_announcement(
             title=title, description=desc_snippet, yt_url=yt_url, series=series,
+            next_video_teaser=next_video_teaser,
         )
         msg_id = tg_send_message(
             bot_token=bot_token, chat_id=chat_id, text=text,
@@ -248,11 +397,17 @@ def _publish_full_video_to_telegram(cfg: Config, video_path: Path,
 
 def _build_full_video_announcement(title: str, description: str,
                                    yt_url: str | None,
-                                   series: str = "") -> str:
-    """يبني نص إعلان المحاضرة الكاملة على تليجرام (بديل عن رفع الفيديو)."""
+                                   series: str = "",
+                                   next_video_teaser: str = "") -> str:
+    """يبني نص إعلان المحاضرة الكاملة على تليجرام (بديل عن رفع الفيديو).
+
+    يحتوي على رابط YouTube (لأن تليجرام معتمد على preview للمحتوى) +
+    سطر تشويقي للفيديو القادم لو متاح.
+    """
     parts: list[str] = []
     series = (series or "").strip()
     title = (title or "").strip()
+    teaser = (next_video_teaser or "").strip()
     header = (
         f"📖 <b>محاضرة جديدة من سلسلة {_tg_escape(series)}</b>"
         if series
@@ -265,6 +420,8 @@ def _build_full_video_announcement(title: str, description: str,
         parts.append(_tg_escape(description))
     if yt_url:
         parts.append(f"شاهد المحاضرة كاملةً على يوتيوب:\n{yt_url}")
+    if teaser:
+        parts.append(f"🌟 <b>ترقبوا قريباً:</b> {_tg_escape(teaser)}")
     parts.append(" ".join(_TELEGRAM_HASHTAGS))
     text = "\n\n".join(p for p in parts if p).strip()
     # حد Telegram للنص = 4096 حرف
@@ -439,8 +596,14 @@ def _timestamp_to_seconds(ts: str) -> int:
 
 
 def _publish_full_video_to_fb(cfg: Config, video_path: Path,
-                              title: str, description: str) -> str | None:
-    """يرفع الفيديو الكامل (16:9) لـ FB Page. بيرجع fb_video_id أو None."""
+                              title: str, body: str,
+                              series: str = "",
+                              next_video_teaser: str = "") -> str | None:
+    """يرفع الفيديو الكامل (16:9) لـ FB Page. بيرجع fb_video_id أو None.
+
+    بيستخدم ``_build_fb_main_description`` عشان يبني الوصف بدون رابط YouTube،
+    ومع brand hashtags ثابتة + سطر تشويقي للفيديو القادم.
+    """
     fb_cfg = cfg.get("facebook", default={}) or {}
     if not fb_cfg.get("enabled", False):
         return None
@@ -451,6 +614,10 @@ def _publish_full_video_to_fb(cfg: Config, video_path: Path,
         return None
     try:
         page = creds["pages"][0]
+        description = _build_fb_main_description(
+            title=title, body=body, series=series,
+            next_video_teaser=next_video_teaser,
+        )
         fb_id = upload_video_to_page(
             page_id=page["page_id"],
             page_access_token=page["page_access_token"],
@@ -467,8 +634,14 @@ def _publish_full_video_to_fb(cfg: Config, video_path: Path,
 
 
 def _publish_short_to_fb_reel(cfg: Config, short_path: Path,
-                              caption: str) -> str | None:
-    """يرفع short كـ Facebook Reel. بيرجع fb_video_id أو None."""
+                              short_description: str,
+                              series: str = "",
+                              next_video_teaser: str = "") -> str | None:
+    """يرفع short كـ Facebook Reel. بيرجع fb_video_id أو None.
+
+    بيستخدم ``_build_fb_reel_description`` — بدون رابط YouTube، ومع brand
+    hashtags ثابتة + تشويق للفيديو القادم.
+    """
     fb_cfg = cfg.get("facebook", default={}) or {}
     if not fb_cfg.get("enabled", False):
         return None
@@ -479,6 +652,10 @@ def _publish_short_to_fb_reel(cfg: Config, short_path: Path,
         return None
     try:
         page = creds["pages"][0]
+        caption = _build_fb_reel_description(
+            short_description=short_description, series=series,
+            next_video_teaser=next_video_teaser,
+        )
         fb_id = upload_reel_to_page(
             page_id=page["page_id"],
             page_access_token=page["page_access_token"],
@@ -893,12 +1070,19 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
     tg_main_message_id: int | None = None
     yt_url = f"https://youtu.be/{item.video_id}"
     series_for_tg = (item.series or "").strip()
+    # احسب التشويق للفيديو القادم في نفس السلسلة (مشترك بين FB + Telegram)
+    next_teaser = _compute_next_teaser(
+        cfg=cfg, current_video_path=Path(item.original_path),
+        series=series_for_tg,
+    )
     if Path(original_local).exists():
         fb_main_video_id = _publish_full_video_to_fb(
             cfg=cfg,
             video_path=Path(original_local),
             title=md.title,
-            description=full_description,
+            body=md.description,  # raw body بدون chapters؛ مفيش YouTube link جوّاه
+            series=series_for_tg,
+            next_video_teaser=next_teaser,
         )
     # ===== Telegram (منشور إعلان نصي + رابط YouTube — مش رفع للملف) =====
     # لا نشترط وجود الملف الأصلي لأننا بنبعت نص فقط
@@ -909,6 +1093,7 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
         description=full_description,
         yt_url=yt_url,
         series=series_for_tg,
+        next_video_teaser=next_teaser,
     )
 
     uploaded_shorts: list[str] = []
@@ -1021,6 +1206,10 @@ def _upload_shorts_for_video(cfg, youtube, parent, md: VideoMetadata,
     series = (parent.series or "").strip()
     parent_url = f"https://youtu.be/{parent.video_id}"
     default_tags = list(yt_cfg.get("default_tags", []) or [])
+    # تشويق للفيديو القادم في نفس السلسلة — يضاف لكل Reel/Short post
+    next_teaser_for_shorts = _compute_next_teaser(
+        cfg=cfg, current_video_path=Path(parent.original_path), series=series,
+    )
 
     uploaded: list[str] = []
     fb_uploaded: list[str] = []
@@ -1111,17 +1300,22 @@ def _upload_shorts_for_video(cfg, youtube, parent, md: VideoMetadata,
                 except Exception as e:
                     logger.warning(f"فشل ربط الـ Short بـ playlist: {e}")
 
-            # ===== رفع نفس الـ short كـ Facebook Reel + Instagram Reel =====
-            reel_caption = _build_reel_caption(
-                base_text=clip_desc, parent_url=parent_url
-            )
+            # ===== رفع نفس الـ short كـ Facebook Reel =====
+            # FB Reel: بدون رابط YouTube + brand hashtags + تشويق
             fb_id = _publish_short_to_fb_reel(
-                cfg=cfg, short_path=short_path, caption=reel_caption
+                cfg=cfg, short_path=short_path,
+                short_description=clip_desc,
+                series=series,
+                next_video_teaser=next_teaser_for_shorts,
             )
             if fb_id:
                 fb_uploaded.append(fb_id)
+            # IG Reel: لسه بيستخدم الـ caption القديم (مع رابط — Instagram لا يقص الروابط)
+            ig_caption = _build_reel_caption(
+                base_text=clip_desc, parent_url=parent_url
+            )
             ig_id = _publish_short_to_ig_reel(
-                cfg=cfg, short_path=short_path, caption=reel_caption
+                cfg=cfg, short_path=short_path, caption=ig_caption
             )
             if ig_id:
                 ig_uploaded.append(ig_id)
