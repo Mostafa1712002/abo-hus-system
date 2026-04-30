@@ -339,7 +339,7 @@ def _publish_quote_to_telegram(cfg: Config, quote: TelegramQuote,
     الفورمات (HTML, RTL):
         ✦ <b>{series} — اقتباس</b>
 
-        ▎{quote.text}
+        «{quote.text}»
         <i>{quote.context_hint}</i>   ← اختياري لو موجود
 
         — {speaker}
@@ -385,8 +385,8 @@ def _publish_quote_to_telegram(cfg: Config, quote: TelegramQuote,
     else:
         parts.append("✦ <b>اقتباس من المحاضرة</b>")
 
-    # الاقتباس نفسه — نستخدم ▎ كـ visual blockquote bar
-    quote_lines = [f"▎{_tg_escape(quote.text.strip())}"]
+    # الاقتباس نفسه — نستخدم «» كعلامتي اقتباس عربية
+    quote_lines = [f"«{_tg_escape(quote.text.strip())}»"]
     ctx = (quote.context_hint or "").strip()
     if ctx:
         quote_lines.append(f"<i>{_tg_escape(ctx)}</i>")
