@@ -37,7 +37,8 @@ HOST = "213.239.209.167"
 USER = "abuhafsi"
 PORT = 22
 
-VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".wmv", ".flv", ".mov", ".m4v", ".webm", ".mpg", ".mpeg", ".ts"}
+VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".wmv", ".flv", ".mov", ".m4v", ".webm",
+              ".mpg", ".mpeg", ".ts", ".rmvb", ".rm", ".3gp", ".vob", ".ogv"}
 
 # ---------------------------------------------------------------- helpers
 def connect() -> tuple[paramiko.SSHClient, paramiko.SFTPClient]:

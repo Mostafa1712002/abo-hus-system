@@ -20,7 +20,8 @@ from .cold_storage import ColdStorage
 
 logger = logging.getLogger(__name__)
 
-VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".wmv", ".flv", ".mov", ".m4v", ".webm"}
+VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".wmv", ".flv", ".mov", ".m4v", ".webm",
+                    ".mpg", ".mpeg", ".ts", ".rmvb", ".rm", ".3gp", ".vob", ".ogv"}
 
 # Boundary timestamps used to classify folders into waves.
 WAVE2_START = datetime(2025, 1, 1)

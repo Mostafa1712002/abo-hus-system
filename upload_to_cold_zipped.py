@@ -60,7 +60,7 @@ USER = "abuhafsi"
 PORT = 22
 
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".wmv", ".flv", ".mov", ".m4v", ".webm",
-              ".mpg", ".mpeg", ".ts"}
+              ".mpg", ".mpeg", ".ts", ".rmvb", ".rm", ".3gp", ".vob", ".ogv"}
 
 # Skip a remote zip whose size is within this fraction of the expected size.
 # Zip-with-STORE adds ~30 bytes per file overhead + a central directory, so
@@ -104,13 +104,35 @@ def remote_mkdirs(sftp: paramiko.SFTPClient, remote_dir: str) -> None:
 
 
 def collect_videos(series_dir: Path) -> list[Path]:
-    """Return all video files under `series_dir` (recursive)."""
+    """Return all video files under `series_dir` (recursive).
+
+    Prefers a transcoded `.mp4` over a same-stem `.rmvb`/`.rm` source: if both
+    sit next to each other in the same folder, only the `.mp4` ships in the
+    zip (the zip is for upload-ready files). The original `.rmvb` stays on
+    disk untouched.
+    """
     if not series_dir.exists():
         return []
-    return sorted(
+    files = [
         p for p in series_dir.rglob("*")
         if p.is_file() and p.suffix.lower() in VIDEO_EXTS
-    )
+    ]
+    # Build (parent_dir, stem_lower) -> exts map so we can drop .rmvb/.rm
+    # when an .mp4 sibling exists.
+    by_stem: dict[tuple[str, str], set[str]] = {}
+    for p in files:
+        key = (str(p.parent), p.stem.lower())
+        by_stem.setdefault(key, set()).add(p.suffix.lower())
+    filtered: list[Path] = []
+    for p in files:
+        ext = p.suffix.lower()
+        if ext in (".rmvb", ".rm"):
+            siblings = by_stem.get((str(p.parent), p.stem.lower()), set())
+            if ".mp4" in siblings:
+                # An .mp4 transcode of this exact file exists; skip the source.
+                continue
+        filtered.append(p)
+    return sorted(filtered)
 
 
 def discover_series(root: Path, only_series: str | None,

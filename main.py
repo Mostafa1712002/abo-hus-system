@@ -54,7 +54,8 @@ def setup_logging(log_dir: Path):
 
 
 def find_videos(input_dir: Path, scan_subfolders: bool = False) -> list:
-    extensions = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".wmv", ".flv"}
+    extensions = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".wmv", ".flv",
+                  ".mpg", ".mpeg", ".ts", ".rmvb", ".rm", ".3gp", ".vob", ".ogv"}
     if scan_subfolders:
         files = [p for p in input_dir.rglob("*") if p.is_file() and p.suffix.lower() in extensions]
     else:

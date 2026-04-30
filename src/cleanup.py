@@ -251,6 +251,7 @@ def cleanup_completed_videos(cfg: Config, dry_run: bool = False) -> dict:
                                 ".mp4", ".mkv", ".avi", ".wmv",
                                 ".flv", ".mov", ".m4v", ".webm",
                                 ".mpg", ".mpeg", ".ts",
+                                ".rmvb", ".rm", ".3gp", ".vob", ".ogv",
                             )
                         ]
                         if not remaining_videos and not dry_run:

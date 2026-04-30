@@ -309,7 +309,8 @@ class ColdStorage:
             remote_dir = self.remote_root
 
         # iname filters for common video extensions.
-        exts = ("mp4", "mkv", "avi", "wmv", "flv", "mov", "m4v", "webm")
+        exts = ("mp4", "mkv", "avi", "wmv", "flv", "mov", "m4v", "webm",
+                "mpg", "mpeg", "ts", "rmvb", "rm", "3gp", "vob", "ogv")
         find_filters = " -o ".join(f"-iname '*.{e}'" for e in exts)
         remote_cmd = (
             f"find {shlex.quote(remote_dir)} -type f \\( {find_filters} \\) 2>/dev/null"
