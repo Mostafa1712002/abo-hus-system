@@ -1118,6 +1118,24 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
             series=series_for_tg,
             next_video_teaser=next_teaser,
         )
+    # ===== جعل الفيديو علنياً (public) قبل النشر على تليجرام =====
+    # عشان لما المستخدم يضغط على الـ link في تليجرام يلاقي الفيديو متاح
+    # (مش 'مدرج / unlisted' ولا 'private')
+    try:
+        youtube.videos().update(
+            part="status",
+            body={
+                "id": item.video_id,
+                "status": {
+                    "privacyStatus": "public",
+                    "selfDeclaredMadeForKids": False,
+                },
+            },
+        ).execute()
+        logger.info(f"✓ تم جعل الفيديو علنياً: {item.video_id}")
+    except Exception as e:
+        logger.warning(f"فشل جعل الفيديو علنياً (سيظل مجدولاً): {e}")
+
     # ===== Telegram (منشور إعلان نصي + رابط YouTube — مش رفع للملف) =====
     # لا نشترط وجود الملف الأصلي لأننا بنبعت نص فقط
     tg_main_message_id = _publish_full_video_to_telegram(
