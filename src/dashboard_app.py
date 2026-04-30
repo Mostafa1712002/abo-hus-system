@@ -8,18 +8,22 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import secrets
 from collections import deque
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.sessions import SessionMiddleware
 
 from src.config import Config
+from src.db import User, get_session_factory, init_db
 from src.pending_tracker import PendingTracker
 from src.wave_planner import (
     find_videos_in_series,
@@ -46,6 +50,37 @@ app = FastAPI(
     docs_url="/api/docs",
     redoc_url=None,
 )
+
+# Session middleware. Use ABUHAFS_SESSION_SECRET in prod; for dev we generate a
+# fresh ephemeral secret per process and warn the operator that sessions will
+# not survive a restart.
+_SESSION_SECRET = os.environ.get("ABUHAFS_SESSION_SECRET")
+if not _SESSION_SECRET:
+    _SESSION_SECRET = secrets.token_urlsafe(32)
+    logger.warning(
+        "ABUHAFS_SESSION_SECRET not set — using an ephemeral random secret. "
+        "Logins will be invalidated when the dashboard process restarts. "
+        "Set this env var to a stable random string in systemd to fix."
+    )
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=_SESSION_SECRET,
+    session_cookie="abuhafs_session",
+    max_age=14 * 24 * 60 * 60,  # 14 days
+    same_site="lax",
+    https_only=False,  # nginx in front handles TLS termination
+)
+
+# Initialize the DB lazily but eagerly enough that `current_user` doesn't have
+# to do it on every request. Failures here are tolerated — the auth dependency
+# will still kick users to /login.
+try:
+    _engine = init_db()
+    _Session = get_session_factory(_engine)
+except Exception as _e:  # pragma: no cover — defensive
+    logger.error("DB init failed: %s — auth will fail open to /login", _e)
+    _engine = None
+    _Session = None
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -145,22 +180,183 @@ def _format_dict(item) -> dict:
         return dict(item.__dict__)
 
 
+# --- Auth -------------------------------------------------------------------
+class AuthRedirect(HTTPException):
+    """Marker exception so the global handler can redirect HTML clients."""
+
+    def __init__(self):
+        super().__init__(status_code=401, detail="login required")
+
+
+def _get_user_by_id(user_id: int) -> Optional[User]:
+    if _Session is None:
+        return None
+    try:
+        with _Session() as s:
+            return s.get(User, user_id)
+    except Exception as e:
+        logger.warning("get_user_by_id failed: %s", e)
+        return None
+
+
+def current_user(request: Request) -> User:
+    """Dependency: returns the logged-in User or raises AuthRedirect (401)."""
+    uid = request.session.get("user_id")
+    if not uid:
+        raise AuthRedirect()
+    user = _get_user_by_id(int(uid))
+    if user is None:
+        # Stale session.
+        request.session.clear()
+        raise AuthRedirect()
+    return user
+
+
+def _is_html_request(request: Request) -> bool:
+    """Heuristic: is this a browser navigation (vs an HTMX/JSON XHR)?"""
+    if request.headers.get("hx-request") == "true":
+        return False
+    accept = request.headers.get("accept", "")
+    return "text/html" in accept
+
+
+@app.exception_handler(AuthRedirect)
+async def _auth_redirect_handler(request: Request, exc: AuthRedirect):
+    if _is_html_request(request):
+        next_url = request.url.path
+        if request.url.query:
+            next_url += f"?{request.url.query}"
+        return RedirectResponse(
+            url=f"/login?next={next_url}", status_code=303
+        )
+    # API/HTMX clients get a JSON 401 with an HX-Redirect hint so HTMX can act.
+    return JSONResponse(
+        {"detail": "login required"},
+        status_code=401,
+        headers={"HX-Redirect": "/login"},
+    )
+
+
+# --- Routes: Auth -----------------------------------------------------------
+@app.get("/login", response_class=HTMLResponse, include_in_schema=False)
+async def login_form(request: Request, next: str = "/", error: Optional[str] = None):
+    # If already logged in, bounce to dashboard.
+    uid = request.session.get("user_id")
+    if uid and _get_user_by_id(int(uid)) is not None:
+        return RedirectResponse(url=next or "/", status_code=303)
+    return templates.TemplateResponse(
+        request,
+        "login.html",
+        {
+            "next": next or "/",
+            "error": error,
+            "channel_name": "قناة الشيخ سامي العربي",
+        },
+    )
+
+
+@app.post("/login", include_in_schema=False)
+async def login_submit(
+    request: Request,
+    email: str = Form(...),
+    password: str = Form(...),
+    next: str = Form("/"),
+):
+    import bcrypt
+
+    if _Session is None:
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {
+                "next": next or "/",
+                "error": "تعذّر الاتصال بقاعدة البيانات.",
+                "channel_name": "قناة الشيخ سامي العربي",
+            },
+            status_code=500,
+        )
+
+    email = (email or "").strip().lower()
+    if not email or not password:
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {
+                "next": next or "/",
+                "error": "أدخل البريد وكلمة المرور.",
+                "channel_name": "قناة الشيخ سامي العربي",
+            },
+            status_code=400,
+        )
+
+    with _Session() as s:
+        user = s.query(User).filter_by(email=email).first()
+        if user is None:
+            # Constant-ish work to avoid trivial timing oracle.
+            bcrypt.checkpw(b"x", bcrypt.hashpw(b"x", bcrypt.gensalt()))
+            return templates.TemplateResponse(
+                request,
+                "login.html",
+                {
+                    "next": next or "/",
+                    "error": "البريد أو كلمة المرور غير صحيحة.",
+                    "channel_name": "قناة الشيخ سامي العربي",
+                },
+                status_code=401,
+            )
+        try:
+            ok = bcrypt.checkpw(
+                password.encode("utf-8"), user.password_hash.encode("utf-8")
+            )
+        except Exception as e:
+            logger.warning("bcrypt check failed for %s: %s", email, e)
+            ok = False
+        if not ok:
+            return templates.TemplateResponse(
+                request,
+                "login.html",
+                {
+                    "next": next or "/",
+                    "error": "البريد أو كلمة المرور غير صحيحة.",
+                    "channel_name": "قناة الشيخ سامي العربي",
+                },
+                status_code=401,
+            )
+        user.last_login = datetime.utcnow()
+        s.commit()
+        request.session["user_id"] = user.id
+        request.session["user_email"] = user.email
+        request.session["user_name"] = user.name or user.email
+
+    # Allow only relative redirects to avoid open-redirects.
+    safe_next = next if next and next.startswith("/") else "/"
+    return RedirectResponse(url=safe_next, status_code=303)
+
+
+@app.get("/logout", include_in_schema=False)
+async def logout(request: Request):
+    request.session.clear()
+    return RedirectResponse(url="/login", status_code=303)
+
+
 # --- Routes: HTML -----------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
+async def home(request: Request, user: User = Depends(current_user)):
     return templates.TemplateResponse(
         request,
         "dashboard.html",
         {
             "now": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "channel_name": "قناة الشيخ سامي العربي",
+            "user_name": user.name or user.email,
+            "user_email": user.email,
         },
     )
 
 
 # --- Routes: API ------------------------------------------------------------
 @app.get("/api/stats")
-async def api_stats():
+async def api_stats(user: User = Depends(current_user)):
     tracker = _load_tracker()
     items = tracker.all()
 
@@ -202,6 +398,7 @@ async def api_videos(
     status: Optional[str] = Query(None),
     series: Optional[str] = Query(None),
     limit: int = Query(500, ge=1, le=5000),
+    user: User = Depends(current_user),
 ):
     tracker = _load_tracker()
     items = [_format_dict(i) for i in tracker.all()]
@@ -217,7 +414,7 @@ async def api_videos(
 
 
 @app.get("/api/video/{video_id}")
-async def api_video_one(video_id: str):
+async def api_video_one(video_id: str, user: User = Depends(current_user)):
     tracker = _load_tracker()
     item = tracker.get(video_id)
     if not item:
@@ -228,7 +425,10 @@ async def api_video_one(video_id: str):
 
 
 @app.get("/api/logs")
-async def api_logs(n: int = Query(200, ge=1, le=5000)):
+async def api_logs(
+    n: int = Query(200, ge=1, le=5000),
+    user: User = Depends(current_user),
+):
     return {
         "process_check": _tail(PROCESS_LOG, n),
         "uploader": _tail(UPLOADER_LOG, n),
@@ -238,7 +438,7 @@ async def api_logs(n: int = Query(200, ge=1, le=5000)):
 
 
 @app.get("/api/library")
-async def api_library():
+async def api_library(user: User = Depends(current_user)):
     cfg = _load_config()
     input_root_str = ""
     if cfg is not None:
@@ -330,7 +530,10 @@ async def api_library():
 
 
 @app.get("/api/recent")
-async def api_recent(limit: int = Query(20, ge=1, le=200)):
+async def api_recent(
+    limit: int = Query(20, ge=1, le=200),
+    user: User = Depends(current_user),
+):
     tracker = _load_tracker()
     items = [
         _format_dict(i) for i in tracker.all()
@@ -347,7 +550,7 @@ async def api_recent(limit: int = Query(20, ge=1, le=200)):
 
 
 @app.post("/api/retry/{video_id}")
-async def api_retry(video_id: str):
+async def api_retry(video_id: str, user: User = Depends(current_user)):
     tracker = _load_tracker()
     item = tracker.get(video_id)
     if not item:
@@ -368,7 +571,7 @@ async def api_retry(video_id: str):
 
 # Convenience: also expose pending.json raw for debugging
 @app.get("/api/pending.json", include_in_schema=False)
-async def api_pending_raw():
+async def api_pending_raw(user: User = Depends(current_user)):
     if not PENDING_FILE.exists():
         return JSONResponse([])
     try:
@@ -467,8 +670,8 @@ def _platform_links_html(item: dict) -> str:
 
 
 @app.get("/partials/stats", response_class=HTMLResponse, include_in_schema=False)
-async def partial_stats():
-    s = await api_stats()
+async def partial_stats(user: User = Depends(current_user)):
+    s = await api_stats(user=user)
     cards = [
         ("في الانتظار",     s["pending"],          "yellow", "uploaded"),
         ("قيد المعالجة",    s["processing"],       "blue",   "processing"),
@@ -491,8 +694,8 @@ async def partial_stats():
 
 
 @app.get("/partials/library", response_class=HTMLResponse, include_in_schema=False)
-async def partial_library():
-    data = await api_library()
+async def partial_library(user: User = Depends(current_user)):
+    data = await api_library(user=user)
     waves = data.get("waves", [])
     if not waves:
         return HTMLResponse(
@@ -543,7 +746,7 @@ async def partial_library():
 
 
 @app.get("/partials/active", response_class=HTMLResponse, include_in_schema=False)
-async def partial_active():
+async def partial_active(user: User = Depends(current_user)):
     tracker = _load_tracker()
     items = [
         _format_dict(i) for i in tracker.all()
@@ -586,8 +789,8 @@ async def partial_active():
 
 
 @app.get("/partials/recent", response_class=HTMLResponse, include_in_schema=False)
-async def partial_recent():
-    data = await api_recent(limit=20)
+async def partial_recent(user: User = Depends(current_user)):
+    data = await api_recent(limit=20, user=user)
     items = data.get("videos", [])
     if not items:
         return HTMLResponse(
@@ -628,7 +831,7 @@ async def partial_recent():
 
 
 @app.get("/partials/failed", response_class=HTMLResponse, include_in_schema=False)
-async def partial_failed():
+async def partial_failed(user: User = Depends(current_user)):
     tracker = _load_tracker()
     items = [_format_dict(i) for i in tracker.all() if i.status == "failed"]
     items.sort(key=lambda i: i.get("completed_at") or i.get("uploaded_at") or "", reverse=True)
@@ -664,7 +867,10 @@ async def partial_failed():
 
 
 @app.get("/partials/logs", response_class=HTMLResponse, include_in_schema=False)
-async def partial_logs(n: int = Query(100, ge=1, le=2000)):
+async def partial_logs(
+    n: int = Query(100, ge=1, le=2000),
+    user: User = Depends(current_user),
+):
     process = _tail(PROCESS_LOG, n)
     uploader = _tail(UPLOADER_LOG, n)
 

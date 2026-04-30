@@ -109,6 +109,18 @@
       background: linear-gradient(90deg, transparent, rgba(212,175,55,0.45), transparent);
     }
 
+    .logout-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      padding: 6px 12px; border-radius: 8px; font-size: 12.5px; font-weight: 600;
+      border: 1px solid var(--line); background: rgba(255,255,255,0.03);
+      color: #e2e8f0;
+      transition: 0.15s;
+    }
+    .logout-btn:hover {
+      background: rgba(239, 68, 68, 0.15); color: #fecaca;
+      border-color: rgba(239,68,68,0.45);
+    }
+
     /* Scrollbar (subtle gold) */
     ::-webkit-scrollbar { width: 10px; height: 10px; }
     ::-webkit-scrollbar-thumb { background: rgba(212,175,55,0.25); border-radius: 999px; }
@@ -132,9 +144,20 @@
           </div>
         </div>
       </div>
-      <div class="text-left">
-        <div id="now-clock" class="text-base font-semibold gold tracking-wide">{{ now }}</div>
-        <div class="text-xs text-slate-400 mt-1">يتم التحديث تلقائيًا</div>
+      <div class="text-left flex items-center gap-4">
+        <div>
+          <div id="now-clock" class="text-base font-semibold gold tracking-wide">{{ now }}</div>
+          <div class="text-xs text-slate-400 mt-1">يتم التحديث تلقائيًا</div>
+        </div>
+        {% if user_name %}
+        <div class="flex items-center gap-2 pr-3 border-r" style="border-color: var(--line);">
+          <div class="text-right">
+            <div class="text-sm font-semibold">{{ user_name }}</div>
+            <div class="text-xs text-slate-500" dir="ltr">{{ user_email }}</div>
+          </div>
+          <a href="/logout" class="logout-btn" title="تسجيل الخروج">خروج</a>
+        </div>
+        {% endif %}
       </div>
     </div>
     <div class="gold-divider"></div>

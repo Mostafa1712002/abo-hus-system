@@ -779,6 +779,30 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
     srt_path.write_text(srt_text, encoding="utf-8")
     logger.info(f"✓ SRT محفوظ: {srt_path}")
 
+    # Persist SRT into the DB as well, so we can reuse it later (regenerate
+    # metadata with a new prompt, search across lectures, etc.) without
+    # touching the original video file. This is best-effort — the disk SRT
+    # remains the source of truth for the rest of the pipeline.
+    try:
+        from datetime import datetime as _dt
+
+        from src.db import Video, get_session_factory
+
+        Session = get_session_factory()
+        with Session() as _s:
+            _v = _s.query(Video).filter_by(video_id=item.video_id).first()
+            if _v is not None:
+                _v.srt_text = srt_text
+                _v.srt_fetched_at = _dt.utcnow()
+                _s.commit()
+            else:
+                logger.debug(
+                    "SRT-DB: no Video row for %s yet — skipping DB persist",
+                    item.video_id,
+                )
+    except Exception as e:
+        logger.warning(f"failed to persist SRT to DB: {e}")
+
     # ===== Cold storage: fetch the file locally if needed =====
     # We keep ``item.original_path`` as the canonical record (used by the
     # tracker / pending.json), but use ``original_local`` for any operation

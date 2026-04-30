@@ -15,6 +15,12 @@ logs/
 *.log
 pending.json
 
+# SQLite database lives here (per-environment)
+data/
+*.db
+*.sqlite
+*.sqlite3
+
 # Python
 venv/
 env/

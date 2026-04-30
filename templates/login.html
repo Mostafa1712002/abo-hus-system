@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>تسجيل الدخول — {{ channel_name }}</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <style>
+    :root {
+      --navy: #0E1B2C;
+      --navy-2: #122339;
+      --navy-3: #1B3252;
+      --gold: #D4AF37;
+      --gold-soft: #E9C964;
+      --soft: #F8F8F8;
+      --line: rgba(255,255,255,0.08);
+    }
+    html, body {
+      background: var(--navy);
+      color: var(--soft);
+      font-family: 'Cairo', system-ui, -apple-system, "Segoe UI", Tahoma, Arial, sans-serif;
+    }
+    .gold { color: var(--gold); }
+    .card {
+      background: linear-gradient(180deg, var(--navy-2), var(--navy));
+      border: 1px solid var(--line);
+      border-radius: 16px;
+    }
+    .gold-divider {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(212,175,55,0.45), transparent);
+    }
+    .field {
+      width: 100%;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--line);
+      color: var(--soft);
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-size: 15px;
+      font-family: inherit;
+      direction: ltr;
+      text-align: left;
+    }
+    .field:focus {
+      outline: none;
+      border-color: rgba(212,175,55,0.55);
+      box-shadow: 0 0 0 3px rgba(212,175,55,0.15);
+    }
+    .submit {
+      width: 100%;
+      background: linear-gradient(180deg, var(--gold-soft), var(--gold));
+      color: #1a1a1a;
+      font-weight: 700;
+      border-radius: 10px;
+      padding: 12px 16px;
+      font-size: 15px;
+      letter-spacing: 0.3px;
+      transition: transform 0.05s ease;
+    }
+    .submit:hover { filter: brightness(1.05); }
+    .submit:active { transform: translateY(1px); }
+    .errbox {
+      background: rgba(239, 68, 68, 0.10);
+      border: 1px solid rgba(239,68,68,0.35);
+      color: #fecaca;
+      padding: 10px 12px;
+      border-radius: 10px;
+      font-size: 13.5px;
+    }
+    label.lbl {
+      display: block;
+      font-size: 13px;
+      color: #cbd5e1;
+      margin-bottom: 6px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body class="min-h-screen flex items-center justify-center px-4">
+
+  <main class="w-full max-w-md">
+    <div class="card p-7 md:p-8 shadow-2xl">
+      <div class="flex items-center gap-3 mb-5">
+        <img src="/static/logo.png" alt="logo"
+             class="w-12 h-12 rounded-lg border" style="border-color: var(--line);"
+             onerror="this.style.display='none'"/>
+        <div class="min-w-0">
+          <h1 class="text-lg md:text-xl font-bold gold leading-tight truncate">
+            لوحة تحكم {{ channel_name }}
+          </h1>
+          <div class="text-xs text-slate-400 mt-1">تسجيل الدخول للوحة التحكم</div>
+        </div>
+      </div>
+
+      <div class="gold-divider mb-5"></div>
+
+      {% if error %}
+        <div class="errbox mb-4">{{ error }}</div>
+      {% endif %}
+
+      <form method="post" action="/login" class="space-y-4" autocomplete="on">
+        <input type="hidden" name="next" value="{{ next | default('/') }}"/>
+
+        <div>
+          <label class="lbl" for="email">البريد الإلكتروني</label>
+          <input class="field" type="email" id="email" name="email"
+                 autocomplete="username" required autofocus
+                 placeholder="you@example.com"/>
+        </div>
+
+        <div>
+          <label class="lbl" for="password">كلمة المرور</label>
+          <input class="field" type="password" id="password" name="password"
+                 autocomplete="current-password" required
+                 placeholder="••••••••"/>
+        </div>
+
+        <button class="submit" type="submit">دخول</button>
+      </form>
+
+      <div class="text-xs text-slate-500 mt-6 text-center leading-relaxed">
+        وصول مقيّد — قناة الشيخ سامي العربي
+      </div>
+    </div>
+  </main>
+
+</body>
+</html>

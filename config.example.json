@@ -129,6 +129,13 @@
     "max_video_size_mb": 50
   },
 
+  "persistence": {
+    "_comment": "Dashboard storage. JSON stays for backwards-compatibility; DB is the new primary.",
+    "use_database": true,
+    "db_path": "data/abuhafs.db",
+    "fallback_to_json": true
+  },
+
   "cleanup": {
     "enabled": true,
     "delete_after_completion": true,
