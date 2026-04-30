@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
+from .cold_storage import ColdStorage
 from .config import Config
 from .pending_tracker import PendingTracker, PendingVideo
 
@@ -168,9 +169,17 @@ def cleanup_completed_videos(cfg: Config, dry_run: bool = False) -> dict:
     paths = cfg.paths
     srt_dir = Path(paths.get("output_srt", "output/srt"))
     shorts_dir = Path(paths.get("output_shorts", "output/shorts"))
+    videos_input = Path(paths.get("videos_input", "")) if paths.get(
+        "videos_input"
+    ) else None
 
     tracker = PendingTracker(_pending_path(cfg))
     completed = [i for i in tracker.all() if i.status == "completed"]
+
+    # Build a ColdStorage so we can delegate zip-cache cleanup back to it.
+    cold = ColdStorage.from_config(cfg)
+    is_zipped_mode = cold.enabled and (cold.type or "raw").lower() == "zipped"
+    series_seen: set[str] = set()
 
     videos_deleted = 0
     bytes_freed = 0
@@ -225,6 +234,46 @@ def cleanup_completed_videos(cfg: Config, dry_run: bool = False) -> dict:
             if local_deleted_original:
                 videos_deleted += 1
             bytes_freed += local_freed
+
+            # ===== Zipped cold-storage: drop empty series dir + cached zip =====
+            # We do this once per series (the zip is a single shared cache for
+            # all videos in the series, so checking after every video would be
+            # wasteful). We only act when the series dir has no remaining
+            # video files — that's the strongest signal nothing else needs it.
+            if is_zipped_mode and item.series and item.series not in series_seen:
+                series_seen.add(item.series)
+                if videos_input is not None:
+                    series_dir = videos_input / item.series
+                    if series_dir.exists() and series_dir.is_dir():
+                        remaining_videos = [
+                            p for p in series_dir.rglob("*")
+                            if p.is_file() and p.suffix.lower() in (
+                                ".mp4", ".mkv", ".avi", ".wmv",
+                                ".flv", ".mov", ".m4v", ".webm",
+                                ".mpg", ".mpeg", ".ts",
+                            )
+                        ]
+                        if not remaining_videos and not dry_run:
+                            # Try to drop the empty extracted dir.
+                            try:
+                                shutil_rm = __import__("shutil").rmtree
+                                shutil_rm(series_dir)
+                                logger.info(
+                                    f"cleanup zipped: removed empty series "
+                                    f"dir {series_dir}"
+                                )
+                            except OSError as e:
+                                logger.warning(
+                                    f"couldn't remove series dir {series_dir}: {e}"
+                                )
+                # Drop the cached zip if no pending work is left for the series.
+                if not dry_run:
+                    try:
+                        cold.cleanup_zip_if_series_done(item.series)
+                    except Exception as e:
+                        logger.warning(
+                            f"zip-cache cleanup failed for {item.series}: {e}"
+                        )
 
             logger.info(
                 f"cleanup completed: video_id={item.video_id} "
