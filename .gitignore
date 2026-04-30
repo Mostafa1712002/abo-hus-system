@@ -1,0 +1,79 @@
+# Credentials
+credentials/
+*_credentials.json
+*_secret*.json
+token.json
+.env
+.env.*
+
+# Project config (has secrets - use config.example.json instead)
+config.json
+
+# Operational state
+output/
+logs/
+*.log
+pending.json
+
+# Python
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Helper scripts with hardcoded tokens (keep locally, don't push)
+fb_oauth.py
+fb_setup.py
+telegram_setup.py
+telegram_validate.py
+fix_branding.py
+fix_playlist.py
+fix_playlist_desc.py
+check_state.py
+check_kids.py
+check_channel.py
+generate_master_plan_xlsx.py
+
+# Server data with extracted secrets
+server_data/
+fetch_from_server.ps1
+
+# Misc
+whisper_backups/
+demo_outputs/
+videos_input/
+test_generate.php
+*.bak
+*.tmp
+
+# Pip install log
+pip_install*.log
+
+# Mistakenly created paths
+E*مرئيات/

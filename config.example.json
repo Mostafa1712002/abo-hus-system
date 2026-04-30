@@ -1,0 +1,139 @@
+{
+  "_setup_instructions": "Copy this file to config.json and fill in your API keys. Get Gemini keys from aistudio.google.com/apikey, YouTube OAuth from console.cloud.google.com, Meta token from developers.facebook.com, and Telegram bot from @BotFather.",
+  "_comment": "إعدادات قناة فضيلة الشيخ أبو حفص بن العربي الأثري - الشيخ سامي العربي",
+
+  "gemini_api_key": "YOUR_GEMINI_API_KEY_HERE",
+  "gemini_api_keys_rotation": [],
+  "youtube_data_api_key": "YOUR_YOUTUBE_API_KEY_HERE",
+
+  "channel_branding": {
+    "channel_name": "الشيخ سامي العربي",
+    "channel_handle": "@abohafs.elaraby",
+    "channel_full_title": "القناة الرسمية لفضيلة الشيخ العلامة أبو حفص سامي بن العربي الأثري",
+    "speaker_title": "فضيلة الشيخ أبو حفص سامي بن العربي الأثري",
+    "speaker_short": "الشيخ أبو حفص",
+    "content_type": "religious",
+    "language_style": "فصيح موقر",
+    "subscribe_call": "اشترك في قناة الشيخ سامي العربي وفعّل الجرس ليصلك كل جديد"
+  },
+
+  "youtube": {
+    "client_secret_file": "credentials/client_secret.json",
+    "token_file": "credentials/token.json",
+    "channel_id": "UCF9RpVopdD5j5qX9bsii6AA",
+    "default_category_id": "27",
+    "default_tags": [
+      "فضيلة الشيخ أبو حفص بن العربي الأثري",
+      "أبو حفص بن العربي الأثري",
+      "الشيخ أبو حفص",
+      "أبو حفص الأثري",
+      "الشيخ سامي العربي",
+      "دروس شرعية",
+      "خطب",
+      "فتاوى",
+      "محاضرات إسلامية",
+      "علم شرعي",
+      "إسلاميات"
+    ],
+    "made_for_kids": false,
+    "default_privacy": "private",
+    "schedule_publish": true,
+    "publish_hour_local": 18,
+    "publish_minute_local": 0,
+    "timezone": "Africa/Cairo"
+  },
+
+  "paths": {
+    "videos_input": "PATH_TO_YOUR_VIDEOS",
+    "output_thumbnails": "output/thumbnails",
+    "output_srt": "output/srt",
+    "output_shorts": "output/shorts",
+    "output_metadata": "output/metadata",
+    "uploaded_archive": "output/uploaded",
+    "scan_subfolders": true
+  },
+
+  "whisper": {
+    "model_size": "medium",
+    "language": "ar",
+    "device": "auto",
+    "compute_type": "auto"
+  },
+
+  "thumbnail": {
+    "width": 1280,
+    "height": 720,
+    "font_path": "fonts/Cairo-Bold.ttf",
+    "title_color": "#FFD700",
+    "stroke_color": "#000000",
+    "stroke_width": 6,
+    "overlay_opacity": 0.55,
+    "frame_selection": "smart",
+    "logo_path": "assets/logo.png",
+    "logo_position": "top-right",
+    "logo_size_ratio": 0.20
+  },
+
+  "shorts": {
+    "enabled": true,
+    "max_clips_per_video": 3,
+    "min_clip_seconds": 25,
+    "max_clip_seconds": 58,
+    "output_aspect": "9:16",
+    "burn_subtitles": false,
+    "subtitle_font_size": 48,
+    "add_logo_to_shorts": true,
+    "logo_path": "assets/logo.png"
+  },
+
+  "ai_prompts": {
+    "title_max_length": 75,
+    "description_min_length": 250,
+    "include_chapters": true,
+    "include_hashtags": true,
+    "max_hashtags": 10,
+    "content_context": "محتوى ديني إسلامي - دروس وخطب وفتاوى لفضيلة الشيخ أبو حفص بن العربي الأثري على قناة الشيخ سامي العربي. اللغة فصحى موقرة. تجنب أي ألفاظ مبتذلة أو إثارة. العنوان يجب أن يكون موحياً ومحفزاً للسماع دون مبالغة وأن يحترم مقام العلم والعلماء. مقاطع الـ Shorts يجب أن توصل الفائدة بسرعة وبلا حشو، فكرة واحدة قوية تقف بذاتها.",
+    "description_template_hint": "ابدأ الوصف بترحيب موجز ثم ملخص للموضوع ثم النقاط الرئيسية ثم نصيحة بمشاركة الفيديو لنشر الخير وأخيراً دعوة للاشتراك في قناة الشيخ سامي العربي.",
+    "shorts_selection_hint": "- يحتوي على فائدة مكثفة قابلة للاقتباس (نقطة واحدة واضحة لا تشتيت).\n- يفتح بهوك قوي خلال أول 3 ثواني: سؤال صادم، حكم قاطع، قصة مؤثرة، نتيجة مفاجئة، أو كلمة قوية.\n- يقف بذاته بدون الحاجة لخلفية أو سياق سابق (السامع يفهم من غير ما يكون شاف الفيديو الأصلي).\n- يغطي فكرة واحدة فقط بشكل كامل ومرتب (لا تعدد ولا أفكار متفرعة).\n- يُفضّل: حكم شرعي واضح، قصة من السلف، رد على شبهة، تحذير قاطع، فائدة لغوية أو حديثية مذهلة، إجابة مختصرة عن سؤال شائع.\n- يُتجنّب: التمهيدات والمقدمات، السرد الطويل بدون لب، ذكر أسانيد مطولة بدون فائدة عملية للمستمع.\n- المدة المثالية 30-50 ثانية، والصوت بدون تقطيع في منتصف الجملة.",
+    "use_series_in_title": true
+  },
+
+  "scheduler": {
+    "watch_folder_seconds": 60,
+    "auto_run": true,
+    "review_before_upload": false
+  },
+
+  "facebook": {
+    "enabled": true,
+    "publish_full_video": true,
+    "publish_shorts_as_reels": true,
+    "credentials_file": "credentials/meta_credentials.json"
+  },
+
+  "instagram": {
+    "enabled": true,
+    "publish_shorts_as_reels": true,
+    "share_to_feed": true
+  },
+
+  "telegram": {
+    "enabled": true,
+    "publish_full_video": true,
+    "publish_shorts": true,
+    "publish_text_quotes": true,
+    "quotes_count": 4,
+    "delay_between_posts_seconds": 3,
+    "credentials_file": "credentials/telegram_credentials.json",
+    "send_text_fallback_for_large_videos": true,
+    "max_video_size_mb": 50
+  },
+
+  "cleanup": {
+    "enabled": true,
+    "delete_after_completion": true,
+    "delete_intermediate_files": true,
+    "keep_final_outputs": true,
+    "cron_hour": 3
+  }
+}

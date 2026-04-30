@@ -1,0 +1,34 @@
+# تفريغ الفيديو لنص (Whisper محلي)
+# faster-whisper - بقينا بنستخدم YouTube auto-captions
+
+# توليد الـ thumbnails والصور
+Pillow==10.4.0
+arabic-reshaper==3.0.0
+python-bidi==0.4.2
+
+# Gemini AI (مجاني)
+google-generativeai==0.8.3
+
+# YouTube API
+google-api-python-client==2.149.0
+google-auth-httplib2==0.2.0
+google-auth-oauthlib==1.2.1
+
+# Utilities
+ffmpeg-python==0.2.0
+schedule==1.2.2
+python-dotenv==1.0.1
+rich==13.9.4
+tzdata
+
+# yt-dlp (fallback لتنزيل auto-captions لما الـ APIs الرسمية تفشل)
+yt-dlp
+
+# Facebook + Instagram Graph API uploads
+requests>=2.31.0
+
+# Web dashboard (FastAPI)
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+jinja2>=3.1.4
+python-multipart>=0.0.9
