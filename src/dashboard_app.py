@@ -904,3 +904,297 @@ async def partial_logs(
       </div>
     </div>
     """)
+
+
+# === Series & Detail Views (added by UI expansion agent) ===
+
+from src.wave_planner import (  # noqa: E402  -- kept local to this section
+    find_videos_in_series_with_cold_fallback,
+    get_series_in_wave_with_cold_fallback,
+)
+
+
+def _ui_pending_to_dict(item) -> dict:
+    """Render a PendingVideo into a template-friendly dict (with links)."""
+    d = _format_dict(item)
+    d["links"] = _video_links(d)
+    d["uploaded_at_short"] = _short_time(d.get("uploaded_at") or "")
+    d["completed_at_short"] = _short_time(d.get("completed_at") or "")
+    return d
+
+
+def _ui_load_gemini_md_for(title: str | None) -> Optional[dict]:
+    """Best-effort match of the Gemini-generated metadata JSON for a video.
+
+    The pipeline writes per-video metadata under ``output/metadata/*.json``.
+    We try to match by exact title; if that fails and only one file exists we
+    return it (useful early in the pipeline when there is one in-flight item).
+    """
+    md_dir = PROJECT_ROOT / "output" / "metadata"
+    if not md_dir.exists():
+        return None
+    try:
+        candidates = list(md_dir.glob("*.json"))
+    except Exception:
+        return None
+    if not candidates:
+        return None
+    if title:
+        for cand in candidates:
+            try:
+                data = json.loads(cand.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if isinstance(data, dict) and data.get("title") == title:
+                return data
+    if len(candidates) == 1:
+        try:
+            return json.loads(candidates[0].read_text(encoding="utf-8"))
+        except Exception:
+            return None
+    return None
+
+
+@app.get("/series", response_class=HTMLResponse)
+async def series_list(request: Request, user: User = Depends(current_user)):
+    """List all series across all waves with progress per series."""
+    cfg = _load_config()
+    tracker = _load_tracker()
+    all_videos = tracker.all()
+
+    series_data: list[dict] = []
+    seen_names: set[str] = set()
+
+    if cfg is not None:
+        try:
+            input_root = Path(cfg.paths.get("videos_input", ""))
+        except Exception:
+            input_root = None
+
+        for wave in (1, 2, 3):
+            try:
+                series_paths = (
+                    get_series_in_wave(input_root, wave) if input_root else []
+                )
+            except Exception as e:
+                logger.warning("get_series_in_wave(%s) failed: %s", wave, e)
+                series_paths = []
+
+            for sp in series_paths:
+                name = sp.name
+                if name in seen_names:
+                    continue
+                seen_names.add(name)
+                try:
+                    library_videos = find_videos_in_series(sp)
+                except Exception:
+                    library_videos = []
+
+                uploaded_records = [v for v in all_videos if v.series == name]
+                completed = sum(
+                    1 for v in uploaded_records if v.status == "completed"
+                )
+                failed = sum(1 for v in uploaded_records if v.status == "failed")
+                in_progress = sum(
+                    1 for v in uploaded_records
+                    if v.status in ("uploaded", "captions_ready", "processing")
+                )
+                total = len(library_videos) if library_videos else len(uploaded_records)
+                series_data.append({
+                    "name": name,
+                    "wave": wave,
+                    "total": total,
+                    "uploaded": len(uploaded_records),
+                    "completed": completed,
+                    "failed": failed,
+                    "in_progress": in_progress,
+                    "remaining": max(0, total - len(uploaded_records)),
+                    "progress_pct": (
+                        round(100 * completed / total, 1) if total else 0
+                    ),
+                })
+
+    # Add tracker-only series (rows in pending.json whose folder is gone or
+    # lives only on cold storage). Default them to wave 3 so they show up.
+    tracker_series_names = {v.series for v in all_videos if v.series}
+    for name in sorted(tracker_series_names):
+        if name in seen_names:
+            continue
+        seen_names.add(name)
+        uploaded_records = [v for v in all_videos if v.series == name]
+        completed = sum(1 for v in uploaded_records if v.status == "completed")
+        failed = sum(1 for v in uploaded_records if v.status == "failed")
+        in_progress = sum(
+            1 for v in uploaded_records
+            if v.status in ("uploaded", "captions_ready", "processing")
+        )
+        total = len(uploaded_records)
+        series_data.append({
+            "name": name,
+            "wave": 3,
+            "total": total,
+            "uploaded": len(uploaded_records),
+            "completed": completed,
+            "failed": failed,
+            "in_progress": in_progress,
+            "remaining": 0,
+            "progress_pct": (
+                round(100 * completed / total, 1) if total else 0
+            ),
+        })
+
+    series_data.sort(key=lambda s: (-s["wave"], s["name"]))
+    total_videos = sum(s["total"] for s in series_data)
+    total_uploaded = sum(s["uploaded"] for s in series_data)
+
+    return templates.TemplateResponse(
+        request,
+        "series_list.html",
+        {
+            "now": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "channel_name": "قناة الشيخ سامي العربي",
+            "series": series_data,
+            "total_videos": total_videos,
+            "total_uploaded": total_uploaded,
+        },
+    )
+
+
+@app.get("/series/{series_name}", response_class=HTMLResponse)
+async def series_detail(
+    request: Request,
+    series_name: str,
+    user: User = Depends(current_user),
+):
+    """Drill-down: all videos in this series with status and links."""
+    cfg = _load_config()
+    tracker = _load_tracker()
+
+    uploaded = [v for v in tracker.all() if v.series == series_name]
+    uploaded.sort(key=lambda v: v.uploaded_at or "")
+
+    library_videos: list[Path] = []
+    if cfg is not None:
+        try:
+            input_root = Path(cfg.paths.get("videos_input", ""))
+            series_dir = input_root / series_name
+            if series_dir.exists():
+                library_videos = find_videos_in_series(series_dir)
+        except Exception as e:
+            logger.warning("series_detail library scan failed: %s", e)
+
+    uploaded_paths = {v.original_path for v in uploaded if v.original_path}
+    pending_videos = [
+        {
+            "original_path": str(p),
+            "name": p.name,
+            "status": "not_started",
+        }
+        for p in library_videos
+        if str(p) not in uploaded_paths
+    ]
+
+    uploaded_dicts = [_ui_pending_to_dict(v) for v in uploaded]
+
+    stats = {
+        "total": len(uploaded) + len(pending_videos),
+        "uploaded": len(uploaded),
+        "completed": sum(1 for v in uploaded if v.status == "completed"),
+        "remaining": len(pending_videos),
+    }
+
+    return templates.TemplateResponse(
+        request,
+        "series_detail.html",
+        {
+            "now": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "channel_name": "قناة الشيخ سامي العربي",
+            "series_name": series_name,
+            "uploaded": uploaded_dicts,
+            "pending_videos": pending_videos,
+            "stats": stats,
+        },
+    )
+
+
+@app.get("/video/{video_id}", response_class=HTMLResponse)
+async def video_detail(
+    request: Request,
+    video_id: str,
+    user: User = Depends(current_user),
+):
+    """Full detail page for a single video with all platform links."""
+    tracker = _load_tracker()
+    item = tracker.get(video_id)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"video_id {video_id} not found")
+
+    vd = _ui_pending_to_dict(item)
+    metadata = item.metadata or {}
+
+    gemini_md = _ui_load_gemini_md_for(item.title_updated)
+
+    yt_url = f"https://youtu.be/{video_id}"
+    fb_main_id = metadata.get("fb_main_video_id") or ""
+    fb_main_url = f"https://www.facebook.com/watch/?v={fb_main_id}" if fb_main_id else ""
+
+    tg_main_id = metadata.get("tg_main_message_id")
+    tg_main_url = (
+        f"https://t.me/abohafs_elaraby/{tg_main_id}" if tg_main_id else ""
+    )
+
+    short_yt_ids = list(metadata.get("short_video_ids") or [])
+    fb_short_ids = list(metadata.get("fb_short_video_ids") or [])
+    ig_short_ids = list(metadata.get("ig_short_media_ids") or [])
+    tg_short_ids = list(metadata.get("tg_short_message_ids") or [])
+    important_clips = []
+    if gemini_md and isinstance(gemini_md.get("important_clips"), list):
+        important_clips = gemini_md["important_clips"]
+
+    shorts: list[dict] = []
+    for i, yt_id in enumerate(short_yt_ids):
+        if not yt_id:
+            continue
+        fb_id = fb_short_ids[i] if i < len(fb_short_ids) else ""
+        ig_id = ig_short_ids[i] if i < len(ig_short_ids) else ""
+        tg_id = tg_short_ids[i] if i < len(tg_short_ids) else ""
+        title = ""
+        if i < len(important_clips) and isinstance(important_clips[i], dict):
+            title = important_clips[i].get("suggested_short_title", "") or ""
+        shorts.append({
+            "yt_url": f"https://www.youtube.com/shorts/{yt_id}" if yt_id else "",
+            "fb_url": f"https://www.facebook.com/watch/?v={fb_id}" if fb_id else "",
+            "ig_id": ig_id,
+            "tg_url": (
+                f"https://t.me/abohafs_elaraby/{tg_id}" if tg_id else ""
+            ),
+            "title": title,
+        })
+
+    quotes = [
+        {"url": f"https://t.me/abohafs_elaraby/{q}", "msg_id": q}
+        for q in (metadata.get("tg_quote_message_ids") or [])
+        if q
+    ]
+
+    try:
+        raw_json = json.dumps(vd, ensure_ascii=False, indent=2, default=str)
+    except Exception:
+        raw_json = str(vd)
+
+    return templates.TemplateResponse(
+        request,
+        "video_detail.html",
+        {
+            "now": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "channel_name": "قناة الشيخ سامي العربي",
+            "vd": vd,
+            "yt_url": yt_url,
+            "fb_main_url": fb_main_url,
+            "tg_main_url": tg_main_url,
+            "shorts": shorts,
+            "quotes": quotes,
+            "gemini_md": gemini_md,
+            "raw_json": raw_json,
+        },
+    )

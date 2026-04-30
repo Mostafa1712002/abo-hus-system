@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ series_name }} — {{ channel_name }}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --navy: #0E1B2C; --navy-2: #122339; --navy-3: #1B3252;
+      --gold: #D4AF37; --gold-soft: #E9C964;
+      --soft: #F8F8F8; --line: rgba(255,255,255,0.08);
+    }
+    html, body { background: var(--navy); color: var(--soft);
+      font-family: 'Cairo', system-ui, sans-serif; }
+    .card {
+      background: linear-gradient(180deg, var(--navy-2), var(--navy));
+      border: 1px solid var(--line); border-radius: 14px;
+    }
+    .gold { color: var(--gold); }
+    .badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 2px 10px; border-radius: 999px; font-size: 12px;
+      font-weight: 600; border: 1px solid var(--line);
+    }
+    .dot { width: 8px; height: 8px; border-radius: 999px; display: inline-block; }
+    .dot-green { background: #22c55e; } .dot-yellow { background: #eab308; }
+    .dot-blue { background: #3b82f6; } .dot-red { background: #ef4444; }
+    .dot-gray { background: #94a3b8; }
+    table.dash { width: 100%; border-collapse: separate; border-spacing: 0; }
+    table.dash th, table.dash td {
+      padding: 10px 12px; border-bottom: 1px solid var(--line);
+      font-size: 14px; vertical-align: middle;
+    }
+    table.dash th {
+      font-weight: 600; color: #cbd5e1; text-align: right;
+      background: rgba(255,255,255,0.02);
+    }
+    table.dash tr:hover td { background: rgba(255,255,255,0.03); }
+    .icon-btn {
+      width: 30px; height: 30px; display: inline-flex;
+      align-items: center; justify-content: center;
+      border-radius: 8px; border: 1px solid var(--line);
+      background: rgba(255,255,255,0.03); color: #e2e8f0;
+      transition: 0.15s;
+    }
+    .icon-btn:hover { background: rgba(212,175,55,0.18); color: var(--gold); }
+    .icon-btn.disabled { opacity: 0.25; pointer-events: none; }
+    .stat-card {
+      padding: 18px 20px; border-radius: 14px;
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, var(--navy-2), var(--navy));
+    }
+    .crumb-link { color: var(--gold-soft); text-decoration: none; font-size: 13px; }
+    .crumb-link:hover { color: var(--gold); }
+  </style>
+</head>
+<body class="min-h-screen">
+  {% include "_nav.html" %}
+
+  <main class="max-w-7xl mx-auto px-6 py-6 space-y-6">
+    <div class="flex items-center justify-between flex-wrap gap-3">
+      <div>
+        <a class="crumb-link" href="/series">‹ رجوع للسلاسل</a>
+        <h1 class="text-2xl font-bold gold mt-1">{{ series_name }}</h1>
+      </div>
+      <div class="badge">
+        <span class="dot dot-yellow"></span>
+        تفاصيل السلسلة
+      </div>
+    </div>
+
+    <!-- Stat cards -->
+    <section class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="stat-card">
+        <div class="text-sm text-slate-400">إجمالي الفيديوهات</div>
+        <div class="text-3xl font-extrabold gold mt-2">{{ stats.total }}</div>
+      </div>
+      <div class="stat-card">
+        <div class="text-sm text-slate-400">تم رفعه</div>
+        <div class="text-3xl font-extrabold text-emerald-300 mt-2">{{ stats.uploaded }}</div>
+      </div>
+      <div class="stat-card">
+        <div class="text-sm text-slate-400">مكتمل</div>
+        <div class="text-3xl font-extrabold text-emerald-200 mt-2">{{ stats.completed }}</div>
+      </div>
+      <div class="stat-card">
+        <div class="text-sm text-slate-400">باقي</div>
+        <div class="text-3xl font-extrabold text-amber-200 mt-2">{{ stats.remaining }}</div>
+      </div>
+    </section>
+
+    <!-- Uploaded -->
+    <section class="card p-5">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-bold">الفيديوهات المرفوعة</h2>
+        <span class="badge"><span class="dot dot-green"></span>{{ uploaded|length }}</span>
+      </div>
+      {% if uploaded %}
+      <div class="overflow-x-auto">
+        <table class="dash">
+          <thead>
+            <tr>
+              <th>العنوان</th>
+              <th>الحالة</th>
+              <th>تاريخ الرفع</th>
+              <th>روابط</th>
+              <th>تفاصيل</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for v in uploaded %}
+            <tr>
+              <td class="max-w-[420px] truncate" title="{{ v.title_updated or v.original_name }}">
+                {{ v.title_updated or v.original_name or v.video_id }}
+              </td>
+              <td>
+                {% set status_map = {
+                    'uploaded': ('في الانتظار', 'yellow'),
+                    'captions_ready': ('جاهز للمعالجة', 'yellow'),
+                    'processing': ('قيد المعالجة', 'blue'),
+                    'completed': ('مكتمل', 'green'),
+                    'failed': ('فشل', 'red')
+                } %}
+                {% set s = status_map.get(v.status, (v.status, 'gray')) %}
+                <span class="badge"><span class="dot dot-{{ s[1] }}"></span>{{ s[0] }}</span>
+              </td>
+              <td class="text-slate-400 text-xs whitespace-nowrap">{{ v.uploaded_at_short }}</td>
+              <td>
+                <div class="flex items-center gap-2 flex-wrap">
+                  {% if v.links.youtube %}
+                    <a class="icon-btn" target="_blank" rel="noopener" href="{{ v.links.youtube }}" title="YouTube">YT</a>
+                  {% else %}
+                    <span class="icon-btn disabled" title="YouTube">YT</span>
+                  {% endif %}
+                  {% if v.links.facebook %}
+                    <a class="icon-btn" target="_blank" rel="noopener" href="{{ v.links.facebook }}" title="Facebook">FB</a>
+                  {% else %}
+                    <span class="icon-btn disabled" title="Facebook">FB</span>
+                  {% endif %}
+                  {% if v.links.instagram_reels and v.links.instagram_reels|length > 0 %}
+                    <a class="icon-btn" target="_blank" rel="noopener" href="{{ v.links.instagram_reels[0] }}" title="Instagram">IG</a>
+                  {% else %}
+                    <span class="icon-btn disabled" title="Instagram">IG</span>
+                  {% endif %}
+                  {% if v.links.telegram_main_message_id or (v.links.telegram_short_message_ids and v.links.telegram_short_message_ids|length > 0) %}
+                    <span class="icon-btn" title="Telegram">TG</span>
+                  {% else %}
+                    <span class="icon-btn disabled" title="Telegram">TG</span>
+                  {% endif %}
+                </div>
+              </td>
+              <td>
+                <a class="badge gold hover:opacity-80" href="/video/{{ v.video_id }}" style="border-color: var(--gold);">
+                  تفاصيل ←
+                </a>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+        <div class="text-slate-400 text-sm">لم يُرفع أي فيديو من هذه السلسلة بعد.</div>
+      {% endif %}
+    </section>
+
+    <!-- Pending in library -->
+    <section class="card p-5">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-bold">الفيديوهات في الانتظار (المكتبة المحلية)</h2>
+        <span class="badge"><span class="dot dot-yellow"></span>{{ pending_videos|length }}</span>
+      </div>
+      {% if pending_videos %}
+      <div class="overflow-x-auto">
+        <table class="dash">
+          <thead>
+            <tr>
+              <th>اسم الملف</th>
+              <th>المسار</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for p in pending_videos %}
+            <tr>
+              <td class="font-semibold">{{ p.name }}</td>
+              <td class="text-slate-400 text-xs" dir="ltr" style="text-align: left;">{{ p.original_path }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+        <div class="text-slate-400 text-sm">لا توجد فيديوهات في الانتظار في المكتبة المحلية.</div>
+      {% endif %}
+    </section>
+  </main>
+</body>
+</html>

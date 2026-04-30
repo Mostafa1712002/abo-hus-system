@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ vd.title_updated or vd.original_name or vd.video_id }} — {{ channel_name }}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --navy: #0E1B2C; --navy-2: #122339; --navy-3: #1B3252;
+      --gold: #D4AF37; --gold-soft: #E9C964;
+      --soft: #F8F8F8; --line: rgba(255,255,255,0.08);
+    }
+    html, body { background: var(--navy); color: var(--soft);
+      font-family: 'Cairo', system-ui, sans-serif; }
+    .card {
+      background: linear-gradient(180deg, var(--navy-2), var(--navy));
+      border: 1px solid var(--line); border-radius: 14px;
+    }
+    .gold { color: var(--gold); }
+    .badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 12px; border-radius: 999px; font-size: 13px;
+      font-weight: 600; border: 1px solid var(--line);
+    }
+    .badge-lg { padding: 6px 16px; font-size: 14px; }
+    .dot { width: 8px; height: 8px; border-radius: 999px; display: inline-block; }
+    .dot-green { background: #22c55e; } .dot-yellow { background: #eab308; }
+    .dot-blue { background: #3b82f6; } .dot-red { background: #ef4444; }
+    .dot-gray { background: #94a3b8; }
+    .platform-card {
+      padding: 16px; border-radius: 12px; border: 1px solid var(--line);
+      background: rgba(255,255,255,0.02); transition: 0.15s;
+    }
+    .platform-card.active { border-color: rgba(212,175,55,0.4); background: rgba(212,175,55,0.05); }
+    .platform-card a { color: var(--gold-soft); word-break: break-all; font-size: 13px; }
+    .platform-card a:hover { color: var(--gold); }
+    .chip {
+      display: inline-block; padding: 3px 10px; margin: 2px;
+      font-size: 12px; border-radius: 999px;
+      background: rgba(212,175,55,0.10); color: var(--gold-soft);
+      border: 1px solid rgba(212,175,55,0.25);
+    }
+    .ts-chip {
+      font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+      font-size: 12px; color: var(--gold);
+      background: rgba(255,255,255,0.05); padding: 2px 8px;
+      border-radius: 6px; margin-left: 8px;
+    }
+    .crumb-link { color: var(--gold-soft); text-decoration: none; font-size: 13px; }
+    .crumb-link:hover { color: var(--gold); }
+    details { border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+    details > summary { cursor: pointer; font-weight: 600; }
+    pre.json {
+      background: #0a1422; color: #cbd5e1; font-family: ui-monospace, Consolas, monospace;
+      font-size: 12px; padding: 12px; border-radius: 10px;
+      direction: ltr; text-align: left; overflow: auto; max-height: 400px;
+    }
+    .desc-text { white-space: pre-wrap; line-height: 1.7; color: #e2e8f0; }
+    .chap-list li {
+      padding: 6px 0; border-bottom: 1px dashed var(--line);
+      display: flex; align-items: center;
+    }
+    .chap-list li:last-child { border-bottom: 0; }
+    .short-card {
+      padding: 14px; border-radius: 12px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.02);
+    }
+    .short-card .links { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+    .icon-btn {
+      width: 38px; height: 32px; display: inline-flex;
+      align-items: center; justify-content: center;
+      border-radius: 8px; border: 1px solid var(--line);
+      background: rgba(255,255,255,0.03); color: #e2e8f0;
+      font-size: 12px; font-weight: 600;
+    }
+    .icon-btn:hover { background: rgba(212,175,55,0.18); color: var(--gold); }
+    .icon-btn.disabled { opacity: 0.25; pointer-events: none; }
+  </style>
+</head>
+<body class="min-h-screen">
+  {% include "_nav.html" %}
+
+  <main class="max-w-7xl mx-auto px-6 py-6 space-y-6">
+    <div>
+      {% if vd.series %}
+      <a class="crumb-link" href="/series/{{ vd.series | urlencode }}">‹ رجوع لـ {{ vd.series }}</a>
+      {% else %}
+      <a class="crumb-link" href="/series">‹ رجوع للسلاسل</a>
+      {% endif %}
+      <div class="flex items-start justify-between gap-4 flex-wrap mt-2">
+        <h1 class="text-2xl font-bold gold leading-tight max-w-3xl">
+          {{ vd.title_updated or vd.original_name or vd.video_id }}
+        </h1>
+        {% set status_map = {
+            'uploaded': ('في الانتظار', 'yellow'),
+            'captions_ready': ('جاهز للمعالجة', 'yellow'),
+            'processing': ('قيد المعالجة', 'blue'),
+            'completed': ('مكتمل', 'green'),
+            'failed': ('فشل', 'red')
+        } %}
+        {% set s = status_map.get(vd.status, (vd.status, 'gray')) %}
+        <span class="badge badge-lg"><span class="dot dot-{{ s[1] }}"></span>{{ s[0] }}</span>
+      </div>
+      <div class="text-xs text-slate-500 mt-2" dir="ltr">
+        {{ vd.video_id }} · uploaded: {{ vd.uploaded_at }}
+        {% if vd.completed_at %} · completed: {{ vd.completed_at }}{% endif %}
+      </div>
+    </div>
+
+    <!-- Platform links -->
+    <section class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div class="platform-card {% if yt_url %}active{% endif %}">
+        <div class="text-sm text-slate-400 mb-2">YouTube</div>
+        {% if yt_url %}
+          <a href="{{ yt_url }}" target="_blank" rel="noopener">{{ yt_url }}</a>
+        {% else %}
+          <div class="text-slate-500 text-sm">—</div>
+        {% endif %}
+      </div>
+      <div class="platform-card {% if fb_main_url %}active{% endif %}">
+        <div class="text-sm text-slate-400 mb-2">Facebook</div>
+        {% if fb_main_url %}
+          <a href="{{ fb_main_url }}" target="_blank" rel="noopener">{{ fb_main_url }}</a>
+        {% else %}
+          <div class="text-slate-500 text-sm">—</div>
+        {% endif %}
+      </div>
+      <div class="platform-card {% if shorts and shorts|length > 0 and shorts[0].ig_id %}active{% endif %}">
+        <div class="text-sm text-slate-400 mb-2">Instagram (Reels)</div>
+        {% set ig_count = shorts | selectattr("ig_id") | list | length %}
+        {% if ig_count > 0 %}
+          <div class="text-emerald-300 text-sm font-semibold">{{ ig_count }} reel(s) منشورة</div>
+        {% else %}
+          <div class="text-slate-500 text-sm">—</div>
+        {% endif %}
+      </div>
+      <div class="platform-card {% if tg_main_url %}active{% endif %}">
+        <div class="text-sm text-slate-400 mb-2">Telegram</div>
+        {% if tg_main_url %}
+          <a href="{{ tg_main_url }}" target="_blank" rel="noopener">{{ tg_main_url }}</a>
+        {% else %}
+          <div class="text-slate-500 text-sm">—</div>
+        {% endif %}
+      </div>
+    </section>
+
+    <!-- Description / hashtags / chapters from gemini_md (if present) -->
+    {% if gemini_md %}
+    <section class="card p-5 space-y-4">
+      <h2 class="text-lg font-bold gold">الوصف ومعطيات الفيديو</h2>
+
+      {% if gemini_md.description %}
+      <div>
+        <div class="text-sm text-slate-400 mb-2">الوصف</div>
+        <div id="desc-short" class="desc-text">{{ gemini_md.description[:500] }}{% if gemini_md.description|length > 500 %}…{% endif %}</div>
+        {% if gemini_md.description|length > 500 %}
+          <div id="desc-full" class="desc-text" style="display: none;">{{ gemini_md.description }}</div>
+          <button class="text-amber-300 text-sm mt-2 hover:text-amber-100" onclick="
+            var s = document.getElementById('desc-short'); var f = document.getElementById('desc-full');
+            if (f.style.display === 'none') { f.style.display='block'; s.style.display='none'; this.textContent='عرض أقل ▲'; }
+            else { f.style.display='none'; s.style.display='block'; this.textContent='عرض المزيد ▼'; }
+          ">عرض المزيد ▼</button>
+        {% endif %}
+      </div>
+      {% endif %}
+
+      {% if gemini_md.hashtags %}
+      <div>
+        <div class="text-sm text-slate-400 mb-2">الوسوم</div>
+        <div>
+          {% for t in gemini_md.hashtags %}
+            <span class="chip">#{{ t }}</span>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+      {% if gemini_md.chapters %}
+      <div>
+        <div class="text-sm text-slate-400 mb-2">الفصول ({{ gemini_md.chapters|length }})</div>
+        <ul class="chap-list">
+          {% for c in gemini_md.chapters %}
+            <li><span class="ts-chip" dir="ltr">{{ c.timestamp }}</span> <span>{{ c.title }}</span></li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+    </section>
+    {% endif %}
+
+    <!-- Shorts -->
+    {% if shorts %}
+    <section class="card p-5">
+      <h2 class="text-lg font-bold gold mb-3">المقاطع القصيرة (Shorts) — {{ shorts|length }}</h2>
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {% for sh in shorts %}
+        <div class="short-card">
+          <div class="font-semibold mb-2">{{ sh.title or ("قصير #" ~ loop.index) }}</div>
+          <div class="links">
+            {% if sh.yt_url %}
+              <a class="icon-btn" target="_blank" rel="noopener" href="{{ sh.yt_url }}" title="YouTube Shorts">YT</a>
+            {% else %}
+              <span class="icon-btn disabled" title="YouTube Shorts">YT</span>
+            {% endif %}
+            {% if sh.fb_url %}
+              <a class="icon-btn" target="_blank" rel="noopener" href="{{ sh.fb_url }}" title="Facebook">FB</a>
+            {% else %}
+              <span class="icon-btn disabled" title="Facebook">FB</span>
+            {% endif %}
+            {% if sh.ig_id %}
+              <span class="icon-btn" title="Instagram media id: {{ sh.ig_id }}">IG</span>
+            {% else %}
+              <span class="icon-btn disabled" title="Instagram">IG</span>
+            {% endif %}
+            {% if sh.tg_url %}
+              <a class="icon-btn" target="_blank" rel="noopener" href="{{ sh.tg_url }}" title="Telegram">TG</a>
+            {% else %}
+              <span class="icon-btn disabled" title="Telegram">TG</span>
+            {% endif %}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+
+    <!-- Quotes -->
+    {% if quotes %}
+    <section class="card p-5">
+      <h2 class="text-lg font-bold gold mb-3">الاقتباسات على Telegram — {{ quotes|length }}</h2>
+      <div class="flex flex-wrap gap-2">
+        {% for q in quotes %}
+          <a href="{{ q.url }}" target="_blank" rel="noopener" class="chip" style="font-size: 13px;">رسالة #{{ q.msg_id }}</a>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+
+    <!-- Raw tracker state -->
+    <section class="card p-5">
+      <details>
+        <summary class="text-slate-300">حالة الـ Tracker الكاملة (JSON خام)</summary>
+        <pre class="json mt-3">{{ raw_json }}</pre>
+      </details>
+    </section>
+  </main>
+</body>
+</html>
