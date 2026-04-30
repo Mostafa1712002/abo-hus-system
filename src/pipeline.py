@@ -825,22 +825,98 @@ def _generate_playlist_description(cfg: Config, series: str, youtube=None) -> st
     return fallback
 
 
-def get_next_publish_time(cfg: Config, day_offset: int = 0) -> dt.datetime:
+def _parse_publish_times(yt: dict) -> list[tuple[int, int]]:
+    """يرجع قايمة من (hour, minute) للـ slots اليومية.
+
+    يقرا ``publish_times_local`` (مثلاً ``["11:00", "18:00"]``).
+    لو القايمة مش موجودة بيرجع slot واحد من
+    ``publish_hour_local``/``publish_minute_local``.
+    """
+    slots_raw = yt.get("publish_times_local") or []
+    parsed: list[tuple[int, int]] = []
+    if isinstance(slots_raw, list) and slots_raw:
+        for s in slots_raw:
+            try:
+                parts = str(s).strip().split(":")
+                hour = int(parts[0])
+                minute = int(parts[1]) if len(parts) > 1 else 0
+                if 0 <= hour < 24 and 0 <= minute < 60:
+                    parsed.append((hour, minute))
+            except Exception:
+                continue
+    if not parsed:
+        parsed.append((
+            int(yt.get("publish_hour_local", 18)),
+            int(yt.get("publish_minute_local", 0)),
+        ))
+    return parsed
+
+
+def get_next_publish_time(cfg: Config, day_offset: int = 0,
+                          slot_index: int = 0,
+                          existing_publish_times: Optional[list] = None
+                          ) -> dt.datetime:
+    """يحسب موعد النشر التالي لفيديو معيّن.
+
+    - بيقرا ``cfg.youtube.publish_times_local`` (قايمة "HH:MM").
+    - لو القايمة مش موجودة، بيرجع لـ ``publish_hour_local`` فقط (fallback قديم).
+    - ``day_offset``: عدد الأيام بدءاً من اليوم.
+    - ``slot_index``: index الـ slot في يوم محدد (modulo عدد الـ slots).
+    - لو الموعد المحسوب < now + 20min أو موجود بالفعل في
+      ``existing_publish_times``، بنتقدم للـ slot اللي بعده (أو لليوم اللي بعده
+      لو كل الـ slots اليومية اتشغلت).
+    - بيرجع datetime tz-aware بـ timezone الـ config.
+    """
     yt = cfg.youtube
     tz = ZoneInfo(yt.get("timezone", "Africa/Cairo"))
     now = dt.datetime.now(tz)
-    target = now.replace(
-        hour=int(yt.get("publish_hour_local", 18)),
-        minute=int(yt.get("publish_minute_local", 0)),
-        second=0, microsecond=0,
-    )
-    if target <= now:
-        target += dt.timedelta(days=1)
-    target += dt.timedelta(days=day_offset)
     min_target = now + dt.timedelta(minutes=20)
-    if target < min_target:
-        target = min_target
-    return target
+    slots = _parse_publish_times(yt)
+    n_slots = len(slots)
+
+    # نطبّع الـ existing list — مقارنة على basis الدقيقة (نتجاهل الثواني)
+    existing_norm: set[tuple[int, int, int, int, int]] = set()
+    for ex in existing_publish_times or []:
+        try:
+            if isinstance(ex, str):
+                ex = dt.datetime.fromisoformat(ex.replace("Z", "+00:00"))
+            if not isinstance(ex, dt.datetime):
+                continue
+            if ex.tzinfo is None:
+                ex = ex.replace(tzinfo=tz)
+            ex_local = ex.astimezone(tz)
+            existing_norm.add((
+                ex_local.year, ex_local.month, ex_local.day,
+                ex_local.hour, ex_local.minute,
+            ))
+        except Exception:
+            continue
+
+    today = now.date()
+    start_day = max(0, int(day_offset))
+    start_slot = max(0, int(slot_index)) % n_slots
+
+    # نمشي على الـ slots بالترتيب من (start_day, start_slot) للأمام
+    # حد أقصى آمن (365 يوم × n_slots) عشان ما نعملش loop لانهائي
+    for k in range(365 * n_slots + n_slots):
+        flat = start_day * n_slots + start_slot + k
+        d_off = flat // n_slots
+        s_idx = flat % n_slots
+        target_date = today + dt.timedelta(days=d_off)
+        hour, minute = slots[s_idx]
+        target = dt.datetime(
+            target_date.year, target_date.month, target_date.day,
+            hour, minute, 0, 0, tzinfo=tz,
+        )
+        if target < min_target:
+            continue
+        key = (target.year, target.month, target.day, target.hour, target.minute)
+        if key in existing_norm:
+            continue
+        return target
+
+    # fallback نظري — مفروض ما نوصلش هنا
+    return min_target
 
 
 def get_series_name(video_path: Path, root: Path) -> str:
@@ -1024,7 +1100,22 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
     fetched_from_cold = False
     if cold.enabled and not cold.is_local(item.original_path):
         try:
-            local_path = cold.ensure_local(item.original_path)
+            cold_type = (cold.type or "raw").lower()
+            if cold_type == "zipped":
+                # Zip mode: we need (series, basename) to look the video up
+                # inside the cached series zip.
+                video_filename = Path(item.original_path).name
+                series_for_cold = (item.series or "").strip()
+                if not series_for_cold:
+                    raise RuntimeError(
+                        "cold_storage(zipped) needs a non-empty series name "
+                        "but item.series is empty"
+                    )
+                local_path = cold.ensure_local_from_zip(
+                    series_for_cold, video_filename,
+                )
+            else:
+                local_path = cold.ensure_local(item.original_path)
             original_local = str(local_path)
             fetched_from_cold = True
             logger.info(f"✓ نُزّل الفيديو من cold storage: {original_local}")
@@ -1243,6 +1334,19 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
                 logger.info("✓ حُذف نسخة الـ cold-fetched بعد المعالجة")
         except Exception as e:
             logger.warning(f"فشل حذف نسخة الـ cold-fetched (تم تجاهله): {e}")
+        # Zip-mode bonus: if every video in this series is now in a terminal
+        # state (completed/failed), drop the cached zip so we free disk.
+        if (cold.type or "raw").lower() == "zipped":
+            try:
+                if cold.cleanup_zip_if_series_done(item.series or ""):
+                    logger.info(
+                        "✓ حُذف cache zip للسلسلة بعد اكتمالها: %s",
+                        item.series,
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"فشل تنظيف zip cache للسلسلة (تم تجاهله): {e}"
+                )
 
 
 def _upload_shorts_for_video(cfg, youtube, parent, md: VideoMetadata,

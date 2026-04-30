@@ -10,6 +10,7 @@ Commands:
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import logging
 import sys
 import time
@@ -22,6 +23,7 @@ from rich.table import Table
 from src.config import Config
 from src.pending_tracker import PendingTracker
 from src.pipeline import (
+    _parse_publish_times,
     get_next_publish_time,
     get_pending_path,
     get_series_name,
@@ -97,9 +99,27 @@ def cmd_upload_batch(cfg: Config, series: str = "", limit: int = 1, day_offset: 
         videos = videos[:limit]
     console.print(f"[green]هرفع {len(videos)} فيديو[/]")
     youtube = get_youtube(cfg)
+
+    slots_per_day = max(1, len(_parse_publish_times(cfg.youtube)))
+    existing_times: list[dt.datetime] = []
+    for v in tracker.all():
+        if v.publish_at and v.status not in ("completed", "failed"):
+            try:
+                existing_times.append(
+                    dt.datetime.fromisoformat(str(v.publish_at).replace("Z", "+00:00"))
+                )
+            except Exception:
+                pass
+
     for i, video in enumerate(videos):
         try:
-            publish_at = get_next_publish_time(cfg, day_offset=day_offset + i)
+            do = day_offset + (i // slots_per_day)
+            si = i % slots_per_day
+            publish_at = get_next_publish_time(
+                cfg, day_offset=do, slot_index=si,
+                existing_publish_times=existing_times,
+            )
+            existing_times.append(publish_at)
             console.print(f"\n[cyan]({i+1}/{len(videos)}) {video.name}[/]")
             console.print(f"   ينشر في: {publish_at.strftime('%Y-%m-%d %H:%M')}")
             series_name = get_series_name(video, input_dir)
@@ -169,6 +189,23 @@ def cmd_upload_wave(cfg: Config, wave: int, videos_per_day: int = 1,
     if preview_count == 0 and dry_run:
         preview_count = len(plan)
 
+    # Build list of currently-scheduled publish times so we don't double-book
+    # any slot that's already taken by a previously-uploaded video.
+    slots_per_day = max(1, len(_parse_publish_times(cfg.youtube)))
+    existing_times: list[dt.datetime] = []
+    for v in tracker.all():
+        if v.publish_at and v.status not in ("completed", "failed"):
+            try:
+                existing_times.append(
+                    dt.datetime.fromisoformat(str(v.publish_at).replace("Z", "+00:00"))
+                )
+            except Exception:
+                pass
+
+    # نخلّي الـ existing list منفصلة بين الـ preview و الـ upload عشان الـ preview
+    # ما يأثرش على الترتيب الفعلي للرفع.
+    preview_existing = list(existing_times)
+
     console.print("[bold]الخطة:[/]")
     last_series: Path | None = None
     shown = 0
@@ -177,8 +214,13 @@ def cmd_upload_wave(cfg: Config, wave: int, videos_per_day: int = 1,
             break
         if dry_run is False and max_uploads > 0 and shown >= max_uploads:
             break
-        offset = start_day_offset + (idx // videos_per_day)
-        publish_at = get_next_publish_time(cfg, day_offset=offset)
+        offset = start_day_offset + (idx // slots_per_day)
+        slot_idx = idx % slots_per_day
+        publish_at = get_next_publish_time(
+            cfg, day_offset=offset, slot_index=slot_idx,
+            existing_publish_times=preview_existing,
+        )
+        preview_existing.append(publish_at)
         if series_path != last_series:
             console.print(f"\n[magenta]► {series_path.name}[/]")
             last_series = series_path
@@ -203,9 +245,14 @@ def cmd_upload_wave(cfg: Config, wave: int, videos_per_day: int = 1,
     for idx, (series_path, video) in enumerate(plan):
         if uploaded_count >= max_uploads:
             break
-        offset = start_day_offset + (idx // videos_per_day)
+        offset = start_day_offset + (idx // slots_per_day)
+        slot_idx = idx % slots_per_day
         try:
-            publish_at = get_next_publish_time(cfg, day_offset=offset)
+            publish_at = get_next_publish_time(
+                cfg, day_offset=offset, slot_index=slot_idx,
+                existing_publish_times=existing_times,
+            )
+            existing_times.append(publish_at)
             console.print(
                 f"\n[cyan]({uploaded_count+1}/{will_upload}) {series_path.name} / {video.name}[/]"
             )

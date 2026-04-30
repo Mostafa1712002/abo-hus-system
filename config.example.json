@@ -38,8 +38,9 @@
     "made_for_kids": false,
     "default_privacy": "private",
     "schedule_publish": true,
-    "publish_hour_local": 18,
+    "publish_hour_local": 11,
     "publish_minute_local": 0,
+    "publish_times_local": ["11:00", "18:00"],
     "timezone": "Africa/Cairo"
   },
 
@@ -145,13 +146,16 @@
   },
 
   "cold_storage": {
-    "_comment": "When enabled, the pipeline fetches video files from a remote SSH server on demand instead of expecting them locally. Useful for small VPS processing hosts. Leave disabled for local development.",
+    "_comment": "When enabled, the pipeline fetches video files from a remote SSH server on demand instead of expecting them locally. Useful for small VPS processing hosts. Leave disabled for local development. type='zipped' uses one zip per series (cleaner directory layout) and 'raw' uses individual files (legacy).",
     "enabled": false,
+    "type": "zipped",
     "ssh_host": "abuhafsi@213.239.209.167",
     "ssh_remote_root": "/home/abuhafsi/videos_cold",
+    "ssh_remote_zips_root": "/home/abuhafsi/videos_cold_zips",
     "ssh_port": 22,
     "ssh_key": "",
     "fetch_method": "scp",
-    "base_url": "https://abuhafs.info/cold-videos"
+    "base_url": "https://abuhafs.info/cold-videos",
+    "local_temp_zips": "/opt/abuhafs/cold_temp_zips"
   }
 }
