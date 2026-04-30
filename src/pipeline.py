@@ -76,6 +76,19 @@ _TELEGRAM_HASHTAGS = [
     "#إسلاميات",
 ]
 
+# ===== Brand hashtags لـ Telegram (main video announcement) =====
+# هاشتاجز ثابتة بتظهر في كل إعلان محاضرة كاملة على Telegram،
+# نظير FB_BRAND_HASHTAGS لكن من غير #نقال_الخير و #أهل_السنة_والجماعة عشان
+# نخلي السطر الأخير مختصر ومركّز للقراءة الموبايلية.
+_TELEGRAM_BRAND_HASHTAGS = [
+    "#الشيخ_سامي_العربي",
+    "#أبو_حفص_الأثري",
+    "#علم_شرعي",
+    "#دروس_شرعية",
+    "#إسلاميات",
+    "#السلف_الصالح",
+]
+
 # ===== Brand hashtags لـ Facebook =====
 # هاشتاجز ثابتة بتظهر في كل منشور على Facebook (main video + Reels)
 # عشان كل محتوى القناة يبقى متربط ومكتشف من خلال نفس الهاشتاجز.
@@ -351,11 +364,12 @@ def _publish_full_video_to_telegram(cfg: Config, video_path: Path,
     """ينشر منشور نصي على تليجرام يعلن المحاضرة الجديدة + رابط يوتيوب.
 
     ⚠️ ملاحظة مهمة: المحاضرات الكاملة عادةً > 50MB، وهو حد الـ Bot API الرسمي،
-    فبدل ما نحاول نرفع الملف ونفشل، بنبعت **منشور نصي** فيه:
-      - عنوان السلسلة (لو موجود) + عنوان الفيديو bold.
-      - مقتطف من الوصف.
-      - رابط يوتيوب الكامل (مع web_page_preview).
-      - هاشتاجز القناة.
+    فبدل ما نحاول نرفع الملف ونفشل، بنبعت **منشور نصي** فيه نفس برند منشور
+    Facebook (header + عنوان bold + body + teaser + رابط YouTube + brand hashtags).
+
+    الفرق عن FB:
+      - بنحتفظ برابط YouTube لأن تليجرام محتاج preview للوصول للمحتوى الكامل.
+      - بنستخدم HTML tags (`<b>`) لأن Telegram parse_mode=HTML بيدعمها.
 
     `video_path` مش بيتقرا فعلياً، بس بنحتفظ بالـ signature كان عليه.
 
@@ -375,13 +389,13 @@ def _publish_full_video_to_telegram(cfg: Config, video_path: Path,
 
     try:
         # نص الإعلان: header + عنوان الفيديو + ملخص الوصف + رابط + هاشتاجز
-        desc_snippet = (description or "").strip()
-        # نقص الوصف لأول 600 حرف (حد منطقي خفيف للقراءة)
-        if len(desc_snippet) > 600:
-            desc_snippet = desc_snippet[:600].rstrip() + "..."
+        body_snippet = (description or "").strip()
+        # نقص الوصف لأول 800 حرف (حد منطقي خفيف للقراءة)
+        if len(body_snippet) > 800:
+            body_snippet = body_snippet[:800].rstrip() + "..."
 
-        text = _build_full_video_announcement(
-            title=title, description=desc_snippet, yt_url=yt_url, series=series,
+        text = _build_telegram_main_text(
+            title=title, body=body_snippet, yt_url=yt_url, series=series,
             next_video_teaser=next_video_teaser,
         )
         msg_id = tg_send_message(
@@ -395,34 +409,54 @@ def _publish_full_video_to_telegram(cfg: Config, video_path: Path,
         return None
 
 
-def _build_full_video_announcement(title: str, description: str,
-                                   yt_url: str | None,
-                                   series: str = "",
-                                   next_video_teaser: str = "") -> str:
-    """يبني نص إعلان المحاضرة الكاملة على تليجرام (بديل عن رفع الفيديو).
+def _build_telegram_main_text(title: str, body: str,
+                              yt_url: str | None,
+                              series: str = "",
+                              next_video_teaser: str = "") -> str:
+    """يبني نص إعلان المحاضرة الكاملة على تليجرام (مرآة لـ ``_build_fb_main_description``).
 
-    يحتوي على رابط YouTube (لأن تليجرام معتمد على preview للمحتوى) +
-    سطر تشويقي للفيديو القادم لو متاح.
+    الفورمات:
+        📖 <b>محاضرة جديدة من سلسلة "{series}"</b>      ← header
+
+        <b>{title}</b>                                  ← عنوان bold
+
+        {body}                                          ← الوصف الكامل
+
+        🌟 <b>ترقبوا قريباً:</b> {next_video_teaser}    ← لو متاح
+
+        🎬 شاهد المحاضرة كاملة:
+        {yt_url}                                        ← رابط YouTube مع preview
+
+        {brand_hashtags}                                ← هاشتاجز ثابتة
+
+    بنستخدم Telegram HTML parse_mode فبنهرب الأحرف الخاصة في كل حقل ما عدا
+    الـ tags بنحطها يدوياً.
     """
+    series_clean = (series or "").strip()
+    title_clean = (title or "").strip()
+    body_clean = (body or "").strip()
+    teaser_clean = (next_video_teaser or "").strip()
+    url_clean = (yt_url or "").strip()
+
     parts: list[str] = []
-    series = (series or "").strip()
-    title = (title or "").strip()
-    teaser = (next_video_teaser or "").strip()
-    header = (
-        f"📖 <b>محاضرة جديدة من سلسلة {_tg_escape(series)}</b>"
-        if series
-        else "📖 <b>محاضرة جديدة</b>"
-    )
-    parts.append(header)
-    if title:
-        parts.append(f"<b>{_tg_escape(title)}</b>")
-    if description:
-        parts.append(_tg_escape(description))
-    if yt_url:
-        parts.append(f"شاهد المحاضرة كاملةً على يوتيوب:\n{yt_url}")
-    if teaser:
-        parts.append(f"🌟 <b>ترقبوا قريباً:</b> {_tg_escape(teaser)}")
-    parts.append(" ".join(_TELEGRAM_HASHTAGS))
+    if series_clean:
+        # quotes حول اسم السلسلة عشان يبقى مطابق لفورمات FB ("شرح الرسالة")
+        parts.append(
+            f"📖 <b>محاضرة جديدة من سلسلة \"{_tg_escape(series_clean)}\"</b>"
+        )
+    else:
+        parts.append("📖 <b>محاضرة جديدة</b>")
+    if title_clean:
+        parts.append(f"<b>{_tg_escape(title_clean)}</b>")
+    if body_clean:
+        parts.append(_tg_escape(body_clean))
+    if teaser_clean:
+        parts.append(f"🌟 <b>ترقبوا قريباً:</b> {_tg_escape(teaser_clean)}")
+    if url_clean:
+        # رابط YouTube مع label واضح؛ الـ link preview بيتولّد تلقائياً من تليجرام
+        parts.append(f"🎬 شاهد المحاضرة كاملة:\n{url_clean}")
+    parts.append(" ".join(_TELEGRAM_BRAND_HASHTAGS))
+
     text = "\n\n".join(p for p in parts if p).strip()
     # حد Telegram للنص = 4096 حرف
     if len(text) > 4096:
