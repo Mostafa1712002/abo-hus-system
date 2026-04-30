@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>لوحة تحكم — {{ channel_name }}</title>
+
+  <!-- Tailwind via CDN (zero-build) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- HTMX for live updates -->
+  <script src="https://unpkg.com/htmx.org@1.9.12" defer></script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <style>
+    :root {
+      --navy: #0E1B2C;
+      --navy-2: #122339;
+      --navy-3: #1B3252;
+      --gold: #D4AF37;
+      --gold-soft: #E9C964;
+      --soft: #F8F8F8;
+      --line: rgba(255,255,255,0.08);
+    }
+    html, body {
+      background: var(--navy);
+      color: var(--soft);
+      font-family: 'Cairo', system-ui, -apple-system, "Segoe UI", Tahoma, Arial, sans-serif;
+      font-feature-settings: "ss01", "ss02";
+    }
+    .card {
+      background: linear-gradient(180deg, var(--navy-2), var(--navy));
+      border: 1px solid var(--line);
+      border-radius: 14px;
+    }
+    .gold { color: var(--gold); }
+    .ring-gold { box-shadow: 0 0 0 1px rgba(212,175,55,0.35) inset; }
+    .badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 2px 10px; border-radius: 999px;
+      font-size: 12px; font-weight: 600;
+      border: 1px solid var(--line);
+    }
+    .dot { width: 8px; height: 8px; border-radius: 999px; display: inline-block; }
+    .dot-green   { background: #22c55e; }
+    .dot-blue    { background: #3b82f6; }
+    .dot-yellow  { background: #eab308; }
+    .dot-red     { background: #ef4444; }
+    .dot-gray    { background: #94a3b8; }
+
+    .progress {
+      height: 8px; border-radius: 999px; background: rgba(255,255,255,0.08);
+      overflow: hidden;
+    }
+    .progress > span {
+      display: block; height: 100%;
+      background: linear-gradient(90deg, var(--gold), var(--gold-soft));
+    }
+
+    /* Logs box */
+    .logbox {
+      background: #0a1422; color: #cbd5e1;
+      font-family: ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+      font-size: 12.5px; line-height: 1.55;
+      border-radius: 10px; border: 1px solid var(--line);
+      padding: 12px; max-height: 360px; overflow: auto;
+      direction: ltr; text-align: left;
+    }
+    .logbox .ts { color: #64748b; }
+    .logbox .err { color: #fca5a5; }
+    .logbox .ok { color: #86efac; }
+
+    /* Subtle table */
+    table.dash {
+      width: 100%; border-collapse: separate; border-spacing: 0;
+    }
+    table.dash th, table.dash td {
+      padding: 10px 12px; border-bottom: 1px solid var(--line);
+      font-size: 14px; vertical-align: middle;
+    }
+    table.dash th {
+      font-weight: 600; color: #cbd5e1; text-align: right;
+      background: rgba(255,255,255,0.02);
+    }
+
+    .icon-btn {
+      width: 30px; height: 30px; display: inline-flex;
+      align-items: center; justify-content: center;
+      border-radius: 8px; border: 1px solid var(--line);
+      background: rgba(255,255,255,0.03);
+      color: #e2e8f0;
+      transition: 0.15s;
+    }
+    .icon-btn:hover { background: rgba(212,175,55,0.18); color: var(--gold); }
+    .icon-btn.disabled { opacity: 0.25; pointer-events: none; }
+
+    .retry-btn {
+      background: rgba(239, 68, 68, 0.15); color: #fecaca;
+      border: 1px solid rgba(239,68,68,0.45);
+      padding: 4px 12px; border-radius: 8px;
+      font-size: 12.5px; font-weight: 600;
+    }
+    .retry-btn:hover { background: rgba(239, 68, 68, 0.3); }
+
+    .gold-divider {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(212,175,55,0.45), transparent);
+    }
+
+    /* Scrollbar (subtle gold) */
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: rgba(212,175,55,0.25); border-radius: 999px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+  </style>
+</head>
+<body class="min-h-screen">
+
+  <!-- Header -->
+  <header class="border-b" style="border-color: var(--line); background: var(--navy-2);">
+    <div class="max-w-7xl mx-auto px-6 py-5 flex items-center justify-between gap-4 flex-wrap">
+      <div class="flex items-center gap-4">
+        <img src="/static/logo.png" alt="logo" class="w-12 h-12 rounded-lg border" style="border-color: var(--line);"
+             onerror="this.style.display='none'"/>
+        <div>
+          <h1 class="text-xl md:text-2xl font-bold gold leading-tight">
+            لوحة تحكم — قناة الشيخ سامي العربي
+          </h1>
+          <div class="text-xs text-slate-400 mt-1">
+            القناة الرسمية لفضيلة الشيخ أبي حفص سامي بن العربي الأثري
+          </div>
+        </div>
+      </div>
+      <div class="text-left">
+        <div id="now-clock" class="text-base font-semibold gold tracking-wide">{{ now }}</div>
+        <div class="text-xs text-slate-400 mt-1">يتم التحديث تلقائيًا</div>
+      </div>
+    </div>
+    <div class="gold-divider"></div>
+  </header>
+
+  <main class="max-w-7xl mx-auto px-6 py-6 space-y-8">
+
+    <!-- 1) Stats grid -->
+    <section
+      id="stats-grid"
+      hx-get="/partials/stats"
+      hx-trigger="load, every 15s"
+      hx-swap="innerHTML"
+      class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <!-- initial server-side render placeholders; swapped by HTMX endpoint below -->
+      <div class="card p-5 animate-pulse h-24"></div>
+      <div class="card p-5 animate-pulse h-24"></div>
+      <div class="card p-5 animate-pulse h-24"></div>
+      <div class="card p-5 animate-pulse h-24"></div>
+    </section>
+
+    <!-- 2) Library overview -->
+    <section class="card p-5">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-bold">نظرة عامة على المكتبة</h2>
+        <span class="badge"><span class="dot dot-yellow"></span>الموجات</span>
+      </div>
+      <div
+        id="library-table"
+        hx-get="/partials/library"
+        hx-trigger="load, every 60s"
+        hx-swap="innerHTML">
+        <div class="text-slate-400 text-sm">جارٍ التحميل…</div>
+      </div>
+    </section>
+
+    <!-- 3) Active queue -->
+    <section class="card p-5">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-bold">قائمة الانتظار النشطة</h2>
+        <span class="badge"><span class="dot dot-blue"></span>قيد المعالجة</span>
+      </div>
+      <div
+        id="active-queue"
+        hx-get="/partials/active"
+        hx-trigger="load, every 15s"
+        hx-swap="innerHTML">
+        <div class="text-slate-400 text-sm">جارٍ التحميل…</div>
+      </div>
+    </section>
+
+    <!-- 4) Recent + 5) Failed (side by side on lg) -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <section class="card p-5 lg:col-span-2">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-lg font-bold">آخر الفيديوهات</h2>
+          <span class="badge"><span class="dot dot-green"></span>آخر ٢٠</span>
+        </div>
+        <div
+          id="recent-list"
+          hx-get="/partials/recent"
+          hx-trigger="load, every 15s"
+          hx-swap="innerHTML">
+          <div class="text-slate-400 text-sm">جارٍ التحميل…</div>
+        </div>
+      </section>
+
+      <section class="card p-5">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-lg font-bold">الفاشلة</h2>
+          <span class="badge"><span class="dot dot-red"></span>تتطلب إعادة المحاولة</span>
+        </div>
+        <div
+          id="failed-list"
+          hx-get="/partials/failed"
+          hx-trigger="load, every 30s"
+          hx-swap="innerHTML">
+          <div class="text-slate-400 text-sm">جارٍ التحميل…</div>
+        </div>
+      </section>
+    </div>
+
+    <!-- 6) Live logs -->
+    <section class="card p-5">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-bold">سجل التشغيل المباشر</h2>
+        <span class="badge"><span class="dot dot-gray"></span>آخر ١٠٠ سطر</span>
+      </div>
+      <div
+        id="logs-box"
+        hx-get="/partials/logs?n=100"
+        hx-trigger="load, every 5s"
+        hx-swap="innerHTML">
+        <div class="text-slate-400 text-sm">جارٍ التحميل…</div>
+      </div>
+    </section>
+
+    <footer class="text-center text-xs text-slate-500 py-6">
+      لوحة تشغيل محلية — تعمل على المنفذ 8000 — <span class="gold">قناة الشيخ سامي العربي</span>
+    </footer>
+  </main>
+
+  <script>
+    // Live clock (independent of HTMX; cheap)
+    function pad(n){return n<10?'0'+n:n;}
+    function tick(){
+      const d = new Date();
+      const s = d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate())
+              + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+      const el = document.getElementById('now-clock');
+      if (el) el.textContent = s;
+    }
+    setInterval(tick, 1000);
+  </script>
+</body>
+</html>

@@ -135,5 +135,16 @@
     "delete_intermediate_files": true,
     "keep_final_outputs": true,
     "cron_hour": 3
+  },
+
+  "cold_storage": {
+    "_comment": "When enabled, the pipeline fetches video files from a remote SSH server on demand instead of expecting them locally. Useful for small VPS processing hosts. Leave disabled for local development.",
+    "enabled": false,
+    "ssh_host": "abuhafsi@213.239.209.167",
+    "ssh_remote_root": "/home/abuhafsi/videos_cold",
+    "ssh_port": 22,
+    "ssh_key": "",
+    "fetch_method": "scp",
+    "base_url": "https://abuhafs.info/cold-videos"
   }
 }

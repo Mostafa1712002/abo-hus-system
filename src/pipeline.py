@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 import google.generativeai as genai
 
 from .ai_generator import GeminiGenerator, metadata_to_dict, TelegramQuote, VideoMetadata
+from .cold_storage import ColdStorage
 from .config import Config
 from .facebook_uploader import (
     load_meta_credentials,
@@ -778,6 +779,25 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
     srt_path.write_text(srt_text, encoding="utf-8")
     logger.info(f"✓ SRT محفوظ: {srt_path}")
 
+    # ===== Cold storage: fetch the file locally if needed =====
+    # We keep ``item.original_path`` as the canonical record (used by the
+    # tracker / pending.json), but use ``original_local`` for any operation
+    # that actually reads the file off disk (thumbnail, shorts cutting,
+    # FB full-video upload).
+    cold = ColdStorage.from_config(cfg)
+    original_local = item.original_path
+    fetched_from_cold = False
+    if cold.enabled and not cold.is_local(item.original_path):
+        try:
+            local_path = cold.ensure_local(item.original_path)
+            original_local = str(local_path)
+            fetched_from_cold = True
+            logger.info(f"✓ نُزّل الفيديو من cold storage: {original_local}")
+        except Exception as e:
+            logger.warning(
+                f"فشل تنزيل الفيديو من cold storage — متابعة بالمسار الأصلي: {e}"
+            )
+
     duration = _get_duration_from_srt(srt_text)
     plain = _srt_plain_text(srt_text)
     with_ts = _srt_with_simple_timestamps(srt_text)
@@ -834,9 +854,9 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
 
     thumb_path = Path(paths["output_thumbnails"]) / f"{base}.jpg"
     thumb_path.parent.mkdir(parents=True, exist_ok=True)
-    if Path(item.original_path).exists():
+    if Path(original_local).exists():
         try:
-            make_thumbnail(video_path=Path(item.original_path),
+            make_thumbnail(video_path=Path(original_local),
                            title=md.title, output_path=thumb_path,
                            config=cfg.thumbnail)
             set_thumbnail(youtube, item.video_id, thumb_path)
@@ -849,10 +869,10 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
     tg_main_message_id: int | None = None
     yt_url = f"https://youtu.be/{item.video_id}"
     series_for_tg = (item.series or "").strip()
-    if Path(item.original_path).exists():
+    if Path(original_local).exists():
         fb_main_video_id = _publish_full_video_to_fb(
             cfg=cfg,
-            video_path=Path(item.original_path),
+            video_path=Path(original_local),
             title=md.title,
             description=full_description,
         )
@@ -860,7 +880,7 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
     # لا نشترط وجود الملف الأصلي لأننا بنبعت نص فقط
     tg_main_message_id = _publish_full_video_to_telegram(
         cfg=cfg,
-        video_path=Path(item.original_path),
+        video_path=Path(original_local),
         title=md.title,
         description=full_description,
         yt_url=yt_url,
@@ -871,12 +891,12 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
     fb_short_video_ids: list[str] = []
     ig_short_media_ids: list[str] = []
     tg_short_message_ids: list[int] = []
-    if cfg.shorts.get("enabled", True) and md.important_clips and Path(item.original_path).exists():
+    if cfg.shorts.get("enabled", True) and md.important_clips and Path(original_local).exists():
         cut_paths: list[Path] = []
         try:
             shorts_dir = Path(paths["output_shorts"]) / base
             cut_paths = cut_all_shorts(
-                video_path=Path(item.original_path),
+                video_path=Path(original_local),
                 clips=md.important_clips, output_dir=shorts_dir,
                 base_name=base, srt_path=srt_path,
                 aspect=cfg.shorts.get("output_aspect", "9:16"),
@@ -952,6 +972,16 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
     tracker.update(item.video_id, status="completed",
                    completed_at=now_iso(), title_updated=md.title,
                    metadata=metadata_summary)
+
+    # ===== Cold-storage cleanup: delete the locally fetched copy =====
+    # We only delete what we ourselves fetched (don't touch the user's
+    # E:\ drive on Windows).
+    if fetched_from_cold and original_local != item.original_path:
+        try:
+            if cold.cleanup(original_local):
+                logger.info("✓ حُذف نسخة الـ cold-fetched بعد المعالجة")
+        except Exception as e:
+            logger.warning(f"فشل حذف نسخة الـ cold-fetched (تم تجاهله): {e}")
 
 
 def _upload_shorts_for_video(cfg, youtube, parent, md: VideoMetadata,

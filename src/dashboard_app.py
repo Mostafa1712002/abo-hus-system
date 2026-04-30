@@ -149,9 +149,9 @@ def _format_dict(item) -> dict:
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     return templates.TemplateResponse(
+        request,
         "dashboard.html",
         {
-            "request": request,
             "now": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "channel_name": "قناة الشيخ سامي العربي",
         },

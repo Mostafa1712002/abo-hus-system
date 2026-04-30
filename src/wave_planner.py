@@ -10,10 +10,15 @@ Wave boundaries (folder mtime):
 """
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import List
+
+from .cold_storage import ColdStorage
+
+logger = logging.getLogger(__name__)
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".wmv", ".flv", ".mov", ".m4v", ".webm"}
 
@@ -88,3 +93,70 @@ def find_videos_in_series(series_path: Path) -> List[Path]:
     ]
     videos.sort(key=lambda p: (_natural_key(str(p.parent)), _natural_key(p.name)))
     return videos
+
+
+def get_series_in_wave_with_cold_fallback(cfg, wave: int) -> List[str]:
+    """Return series names belonging to the given wave.
+
+    Tries the local ``videos_input`` folder first; if it is empty or
+    missing, falls back to listing the cold-storage server via SSH.
+
+    Returns a list of *series names* (str). Local hits return the folder
+    basename; cold-storage hits return the top-level remote directory
+    name. When falling back to cold storage, wave classification is
+    skipped (we can't easily get folder mtimes over ssh) — all series
+    are returned and the caller is expected to filter or process all.
+    """
+    try:
+        local_root = Path(cfg.paths["videos_input"])
+    except Exception:
+        local_root = None
+
+    local_results: List[Path] = []
+    if local_root and local_root.exists():
+        local_results = get_series_in_wave(local_root, wave)
+    if local_results:
+        return [p.name for p in local_results]
+
+    cold = ColdStorage.from_config(cfg)
+    if not cold.enabled:
+        return []
+    try:
+        remote_series = cold.list_remote_series()
+    except Exception as e:
+        logger.warning(f"cold-storage: list_remote_series failed: {e}")
+        return []
+    if not remote_series:
+        return []
+    logger.info(
+        f"wave-planner: local empty, falling back to cold storage "
+        f"({len(remote_series)} series)"
+    )
+    return sorted(remote_series)
+
+
+def find_videos_in_series_with_cold_fallback(cfg, series_name: str) -> List[str]:
+    """Return paths (str) for videos in a series, falling back to cold storage.
+
+    Local paths are returned as absolute strings; cold-storage paths are
+    returned as the remote absolute path so the pipeline can later call
+    ``ColdStorage.ensure_local`` on them.
+    """
+    try:
+        local_root = Path(cfg.paths["videos_input"])
+    except Exception:
+        local_root = None
+
+    if local_root and (local_root / series_name).exists():
+        return [str(p) for p in find_videos_in_series(local_root / series_name)]
+
+    cold = ColdStorage.from_config(cfg)
+    if not cold.enabled:
+        return []
+    rels = cold.list_remote_videos(series=series_name)
+    if not rels:
+        return []
+    rels.sort(key=lambda r: (_natural_key(str(Path(r).parent)),
+                             _natural_key(Path(r).name)))
+    root = (cold.remote_root or "").rstrip("/")
+    return [f"{root}/{rel}" for rel in rels]
