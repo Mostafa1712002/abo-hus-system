@@ -32,6 +32,7 @@ from src.pipeline import (
     upload_phase1,
 )
 from src.wave_planner import (
+    _natural_key,
     classify_wave,
     find_videos_in_series,
     get_series_in_wave,
@@ -60,7 +61,7 @@ def find_videos(input_dir: Path, scan_subfolders: bool = False) -> list:
         files = [p for p in input_dir.rglob("*") if p.is_file() and p.suffix.lower() in extensions]
     else:
         files = [p for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() in extensions]
-    return sorted(files, key=lambda p: (str(p.parent), p.name))
+    return sorted(files, key=lambda p: (_natural_key(str(p.parent)), _natural_key(p.name)))
 
 
 def cmd_upload(cfg: Config, video_path: Path):
