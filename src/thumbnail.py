@@ -118,13 +118,26 @@ def extract_best_frame(
 # ---------------- إضافة النص العربي ----------------
 
 def _shape_arabic(text: str) -> str:
-    """Pass-through: PIL+Raqm handles Arabic shaping natively via direction='rtl'.
-
-    Tested approach: pass raw Arabic text to PIL with direction='rtl' on draw.text
-    and draw.textbbox. This produces correctly connected letters + RTL order.
-    The previous reshape+bidi approach was unreliable when fonts didn't include
-    Arabic Presentation Forms-B."""
-    return text.strip()
+    """Sanitize Arabic title before rendering: strip ASCII parens/brackets and other
+    chars that NotoNaskhArabic-Bold lacks (em-dashes, smart quotes), so they don't
+    render as tofu boxes. PIL+Raqm handles the actual letter shaping via
+    direction='rtl'."""
+    t = text.strip()
+    replacements = {
+        '(': '', ')': '',
+        '[': '', ']': '',
+        '{': '', '}': '',
+        chr(0xFD3F): '', chr(0xFD3E): '',  # Arabic ornate parens (also missing)
+        '—': '،', '–': '،',  # em/en-dash → Arabic comma
+        '"': '', "'": '',
+        '"': '', '"': '',  # smart double quotes
+        ''': '', ''': '',  # smart single quotes
+    }
+    for old, new in replacements.items():
+        t = t.replace(old, new)
+    while '  ' in t:
+        t = t.replace('  ', ' ')
+    return t.strip()
 
 
 def _wrap_arabic(text: str, max_chars_per_line: int = 22) -> list[str]:
