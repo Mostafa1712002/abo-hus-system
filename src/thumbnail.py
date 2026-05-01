@@ -118,15 +118,13 @@ def extract_best_frame(
 # ---------------- إضافة النص العربي ----------------
 
 def _shape_arabic(text: str) -> str:
-    """يحول العربي للشكل الصحيح للعرض (connect letters + RTL)"""
-    try:
-        import arabic_reshaper
-        from bidi.algorithm import get_display
-        reshaped = arabic_reshaper.reshape(text)
-        return get_display(reshaped)
-    except ImportError:
-        logger.warning("arabic_reshaper مش متثبت، النص العربي قد يظهر مكسور")
-        return text
+    """Pass-through: PIL+Raqm handles Arabic shaping natively via direction='rtl'.
+
+    Tested approach: pass raw Arabic text to PIL with direction='rtl' on draw.text
+    and draw.textbbox. This produces correctly connected letters + RTL order.
+    The previous reshape+bidi approach was unreliable when fonts didn't include
+    Arabic Presentation Forms-B."""
+    return text.strip()
 
 
 def _wrap_arabic(text: str, max_chars_per_line: int = 22) -> list[str]:
@@ -229,14 +227,14 @@ def add_text_to_thumbnail(
     # احسب ارتفاع كل سطر
     line_heights = []
     for line in shaped_lines:
-        bbox = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_width)
+        bbox = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_width, direction="rtl")
         line_heights.append(bbox[3] - bbox[1])
     total_h = sum(line_heights) + (len(shaped_lines) - 1) * 10
 
     # ارسم من الأسفل تجاه فوق (بعيد عن الحواف بـ 8%)
     y = height - int(height * 0.08) - total_h
     for line, lh in zip(shaped_lines, line_heights):
-        bbox = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_width)
+        bbox = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_width, direction="rtl")
         text_w = bbox[2] - bbox[0]
         x = (width - text_w) // 2
         draw.text(
@@ -246,6 +244,7 @@ def add_text_to_thumbnail(
             fill=title_color,
             stroke_width=stroke_width,
             stroke_fill=stroke_color,
+            direction="rtl",
         )
         y += lh + 10
 
