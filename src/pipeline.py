@@ -1326,6 +1326,27 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
                    completed_at=now_iso(), title_updated=md.title,
                    metadata=metadata_summary)
 
+    # ===== Re-sort the series playlist =====
+    # New uploads land at the playlist's tail by default; re-sort so the
+    # mains stay in lesson-number order with their shorts grouped under
+    # them. Skips items already in place, so steady-state cost is just
+    # the moves needed for the freshly-added items.
+    pl_for_reorder = (item.playlist_id or "").strip()
+    if not pl_for_reorder and series_key:
+        pl_for_reorder = _PLAYLIST_CACHE.get(series_key, "")
+    if pl_for_reorder:
+        try:
+            from .playlist_reorder import load_main_paths, reorder_playlist
+            tracker_path = get_pending_path(cfg)
+            main_paths = load_main_paths(tracker_path)
+            moves = reorder_playlist(youtube, pl_for_reorder, main_paths)
+            if moves:
+                logger.info(
+                    f"✓ تم ترتيب الـ playlist تلقائياً ({moves} عناصر)"
+                )
+        except Exception as e:
+            logger.warning(f"فشل ترتيب الـ playlist تلقائياً (تم تجاهله): {e}")
+
     # ===== Cold-storage cleanup: delete the locally fetched copy =====
     # We only delete what we ourselves fetched (don't touch the user's
     # E:\ drive on Windows).
