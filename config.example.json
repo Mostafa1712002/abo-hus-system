@@ -72,7 +72,16 @@
     "frame_selection": "smart",
     "logo_path": "assets/logo.png",
     "logo_position": "top-right",
-    "logo_size_ratio": 0.20
+    "logo_size_ratio": 0.20,
+    "enhance": {
+      "_comment": "OpenCV CNN super-resolution على CPU. method: fsrcnn (recommended, ~200MB RAM) | espcn (fastest) | edsr (best quality, ~5GB RAM, won't fit on small servers)",
+      "enabled": true,
+      "method": "fsrcnn",
+      "scale_factor": 4,
+      "model_path": "models/FSRCNN_x4.pb",
+      "apply_sharpen": true,
+      "apply_color_grade": true
+    }
   },
 
   "shorts": {

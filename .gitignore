@@ -81,6 +81,10 @@ test_generate.php
 *.bak
 *.tmp
 
+# AI super-resolution model files (downloaded by deploy/install_thumbnail_enhancer.sh)
+models/
+*.pb
+
 # Pip install log
 pip_install*.log
 

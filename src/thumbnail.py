@@ -409,6 +409,25 @@ def make_thumbnail(
     frame_path = output_path.with_suffix(".frame.jpg")
     extract_best_frame(video_path, frame_path)
 
+    # ✦ مرحلة التحسين (super-resolution على CPU) قبل إضافة النص واللوجو
+    enhance_cfg = config.get("enhance", {}) or {}
+    if enhance_cfg.get("enabled", False):
+        try:
+            from .thumbnail_enhance import enhance_frame
+            enhance_frame(
+                image_path=frame_path,
+                output_path=frame_path,  # in-place
+                method=enhance_cfg.get("method", "edsr"),
+                scale_factor=int(enhance_cfg.get("scale_factor", 4)),
+                model_path=enhance_cfg.get("model_path", ""),
+                target_width=config.get("width", 1280),
+                target_height=config.get("height", 720),
+                apply_sharpen=enhance_cfg.get("apply_sharpen", True),
+                apply_color_grade=enhance_cfg.get("apply_color_grade", True),
+            )
+        except Exception as e:
+            logger.warning(f"فشل تحسين الـ frame ({e}) — استكمال بالإطار الأصلي")
+
     final = add_text_to_thumbnail(
         image_path=frame_path,
         output_path=output_path,

@@ -6,6 +6,11 @@ Pillow==10.4.0
 arabic-reshaper==3.0.0
 python-bidi==0.4.2
 
+# تحسين جودة الـ thumbnail (super-resolution على CPU)
+# opencv-contrib-python فيه dnn_superres (مش موجود في opencv-python العادي)
+opencv-contrib-python>=4.8.0
+numpy>=1.24.0
+
 # Gemini AI (مجاني)
 google-generativeai==0.8.3
 
