@@ -38,6 +38,7 @@ from .youtube_uploader import (
     get_auto_caption,
     get_or_create_playlist,
     get_youtube_service,
+    link_short_to_main,
     set_thumbnail,
     update_video_metadata,
     upload_short,
@@ -1395,10 +1396,15 @@ def _upload_shorts_for_video(cfg, youtube, parent, md: VideoMetadata,
                     f"{md.title} — مقطع مختار{series_part}\n"
                     f"لمشاهدة المحاضرة كاملةً يُرجى متابعة الرابط في الأسفل."
                 )
+            # ⚠️ ضع رابط المحاضرة الأم في أول الوصف:
+            # YouTube بيرندر أول URL في الوصف كـ chip تحت Short — وده
+            # السبيل الموثوق الوحيد المتاح عبر الـ API لربط Short بالفيديو
+            # الأم (endScreens/cards مش متاحين API).
             description_parts = [
+                f"شاهد المحاضرة كاملة: {parent_url}",
+                "",
                 clip_desc,
                 "",
-                f"المحاضرة كاملةً: {parent_url}",
                 f"قناة {channel_name} — {speaker}",
             ]
             if series:
@@ -1424,6 +1430,22 @@ def _upload_shorts_for_video(cfg, youtube, parent, md: VideoMetadata,
                 made_for_kids=yt_cfg.get("made_for_kids", False),
             )
             uploaded.append(short_id)
+
+            # ===== اربط الـ Short بالفيديو الأم =====
+            # الوصف فعلاً بيبدأ بالرابط (شغّاله كـ chip)، لكن نأكّد إن الـ
+            # snippet اتحفظ زي ما هو + ننشر تعليق توجيهي من صاحب القناة.
+            try:
+                link_result = link_short_to_main(
+                    youtube, short_id=short_id, main_id=parent.video_id,
+                    add_comment=True,
+                )
+                logger.info(
+                    f"✓ link_short_to_main #{idx}: "
+                    f"desc_updated={link_result['description_updated']} "
+                    f"comment={'yes' if link_result['comment_id'] else 'no'}"
+                )
+            except Exception as e:
+                logger.warning(f"فشل ربط Short بالأم #{idx}: {e}")
 
             # ===== Thumbnail مخصص للـ Short (اللوجو فقط، بدون نص) =====
             try:

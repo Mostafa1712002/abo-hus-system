@@ -647,3 +647,139 @@ def update_video_metadata(
         body={"id": video_id, "snippet": snippet},
     ).execute()
     logger.info(f"تم تحديث الفيديو {video_id}")
+
+
+# ============================================================
+# Linking Shorts back to their parent main video
+# ============================================================
+#
+# YouTube Data API v3 لا يدعم endScreens / cards (مفتوح كـ feature
+# request على Google Issue Tracker منذ 2025). كذلك `relatedToVideoId`
+# في videos.insert تم إيقافه. الطريقة الموثوقة المتاحة عبر الـ API:
+#
+# 1) **رابط بارز في أول الوصف** — يوتيوب بيرندر أول URL في الوصف كـ
+#    chip/preview تحت الفيديو في معظم العملاء (web + mobile + Shorts
+#    overlay). نضمن إن الرابط يكون أول سطر فعلي.
+#
+# 2) **Auto-comment من صاحب القناة** — `commentThreads.insert` بيكتب
+#    تعليق من صاحب القناة، اللي بيتعلّى تلقائياً في تبويب التعليقات.
+#    (الـ pin الفعلي مش متاح API، لكن channel-owner comments بياخدوا
+#    بادج وأولوية في الترتيب.)
+#
+# نفّذ الاتنين معاً لأقصى ظهور.
+# ============================================================
+
+_PARENT_LINK_PREFIX = "شاهد المحاضرة كاملة"  # نتعرّف عليها لو تكررت
+
+
+def _ensure_parent_link_in_description(description: str, parent_url: str) -> str:
+    """يضمن إن أول سطر في الوصف فيه رابط الفيديو الأم.
+
+    لو الوصف فاضي، يبتدي بسطر رابط نظيف.
+    لو فيه رابط الأم بالفعل في أول 3 أسطر، يسيب الوصف زي ما هو.
+    لو الرابط جوّاه لكن مش في الأعلى، يحط نسخة في الأعلى.
+    """
+    desc = (description or "").strip()
+    header = f"{_PARENT_LINK_PREFIX}: {parent_url}"
+    # شيك على أول 200 حرف بس — لو الرابط هناك بالفعل، خلاص.
+    head = desc[:200]
+    if parent_url in head:
+        return desc[:5000]
+    body = desc
+    return (header + "\n\n" + body).strip()[:5000] if body else header[:5000]
+
+
+def link_short_to_main(
+    youtube,
+    short_id: str,
+    main_id: str,
+    *,
+    add_comment: bool = True,
+) -> dict:
+    """يربط Short بالفيديو الأم بطريقتين:
+
+    1. يحدّث وصف الـ Short بحيث يبدأ بـ "شاهد المحاضرة كاملة: <URL>".
+    2. (اختياري) يكتب تعليق من صاحب القناة على الـ Short فيه نفس الرابط.
+
+    يرجّع dict فيه نتيجة كل خطوة عشان نلوّجها / نتيستها.
+    """
+    parent_url = f"https://youtu.be/{main_id}"
+    result = {
+        "short_id": short_id,
+        "main_id": main_id,
+        "description_updated": False,
+        "description_skipped_reason": "",
+        "comment_id": "",
+        "comment_error": "",
+    }
+
+    # ---- 1) تحديث الوصف ----
+    try:
+        current = youtube.videos().list(part="snippet", id=short_id).execute()
+        items = current.get("items", [])
+        if not items:
+            result["description_skipped_reason"] = "short not found"
+        else:
+            snippet = items[0]["snippet"]
+            old_desc = snippet.get("description", "") or ""
+            new_desc = _ensure_parent_link_in_description(old_desc, parent_url)
+            if new_desc == old_desc:
+                result["description_skipped_reason"] = "already linked"
+            else:
+                snippet["description"] = new_desc
+                # YouTube بيشيل defaultLanguage لو مش موجود في snippet —
+                # نحافظ على باقي الحقول كما هي.
+                youtube.videos().update(
+                    part="snippet",
+                    body={"id": short_id, "snippet": snippet},
+                ).execute()
+                result["description_updated"] = True
+                logger.info(
+                    f"link_short_to_main: تم تحديث وصف Short {short_id} "
+                    f"بإضافة رابط الأم {main_id}"
+                )
+    except HttpError as e:
+        result["description_skipped_reason"] = f"HttpError: {e}"
+        logger.warning(
+            f"link_short_to_main: فشل تحديث وصف {short_id}: {e}"
+        )
+    except Exception as e:
+        result["description_skipped_reason"] = f"Exception: {e}"
+        logger.warning(f"link_short_to_main: خطأ غير متوقع لـ {short_id}: {e}")
+
+    # ---- 2) تعليق من صاحب القناة ----
+    if add_comment:
+        try:
+            comment_text = (
+                f"شاهد المحاضرة كاملة من هنا: {parent_url}"
+            )
+            response = youtube.commentThreads().insert(
+                part="snippet",
+                body={
+                    "snippet": {
+                        "videoId": short_id,
+                        "topLevelComment": {
+                            "snippet": {"textOriginal": comment_text}
+                        },
+                    }
+                },
+            ).execute()
+            result["comment_id"] = response.get("id", "")
+            logger.info(
+                f"link_short_to_main: تم نشر تعليق توجيهي على {short_id} "
+                f"({result['comment_id']})"
+            )
+        except HttpError as e:
+            # الأخطاء الشائعة: التعليقات مقفولة على الفيديو، أو quota
+            result["comment_error"] = f"HttpError: {e}"
+            logger.info(
+                f"link_short_to_main: مفيش تعليق على {short_id} "
+                f"(غالباً التعليقات مقفولة على الـ Shorts): {e}"
+            )
+        except Exception as e:
+            result["comment_error"] = f"Exception: {e}"
+            logger.warning(
+                f"link_short_to_main: فشل تعليق غير متوقع لـ {short_id}: {e}"
+            )
+
+    return result
