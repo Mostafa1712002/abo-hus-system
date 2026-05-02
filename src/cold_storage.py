@@ -63,6 +63,7 @@ class ColdStorage:
     type: str = "raw"                       # "raw" or "zipped"
     remote_zips_root: str = ""              # e.g. "/home/abuhafsi/videos_cold_zips"
     local_temp_zips: Path = Path("/tmp")    # cache dir for downloaded zips
+    keep_zip_archive: bool = False          # if true, never delete cached zip
     # Tracks which (series, filename) we've fetched in the current process
     # so cleanup_zip_if_series_done() knows what to wipe.
     _fetched_videos: dict[str, set[str]] = field(default_factory=dict)
@@ -104,6 +105,7 @@ class ColdStorage:
             type=str(section.get("type", "raw")).strip().lower() or "raw",
             remote_zips_root=section.get("ssh_remote_zips_root", "").rstrip("/"),
             local_temp_zips=Path(local_temp_zips_raw),
+            keep_zip_archive=bool(section.get("keep_zip_archive", False)),
         )
 
     # ------------------------------------------------------------------
@@ -589,15 +591,21 @@ class ColdStorage:
 
         deleted_anything = False
         zip_path = self.local_zip_path_for(series)
-        try:
-            if zip_path.exists():
-                zip_path.unlink()
-                deleted_anything = True
-                logger.info("cold-storage(zipped): removed cached zip %s",
-                            zip_path)
-        except OSError as e:
-            logger.warning("cold-storage(zipped): couldn't remove %s: %s",
-                           zip_path, e)
+        if self.keep_zip_archive:
+            logger.info(
+                "cold-storage(zipped): keep_zip_archive=true — preserving %s",
+                zip_path,
+            )
+        else:
+            try:
+                if zip_path.exists():
+                    zip_path.unlink()
+                    deleted_anything = True
+                    logger.info("cold-storage(zipped): removed cached zip %s",
+                                zip_path)
+            except OSError as e:
+                logger.warning("cold-storage(zipped): couldn't remove %s: %s",
+                               zip_path, e)
 
         # Wipe any extracted videos under <local_workspace>/<series>/.
         series_dir = Path(self.local_workspace) / series

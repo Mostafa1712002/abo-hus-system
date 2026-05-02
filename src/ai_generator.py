@@ -111,8 +111,15 @@ class GeminiGenerator:
         content_context: str = "",
         description_template_hint: str = "",
         shorts_selection_hint: str = "",
+        openai_api_key: str = "",
     ) -> VideoMetadata:
-        """يولد كل الـ metadata في call واحدة (لتقليل عدد الطلبات)"""
+        """يولد كل الـ metadata في call واحدة (لتقليل عدد الطلبات).
+
+        لو openai_api_key متوفر، بنستخدم OpenAI كـ verifier:
+        لكل clip يقترحه Gemini، نستخرج النص الفعلي للـ time range من الـ SRT
+        ونطلب من OpenAI يولّد title/description مبنيين على المحتوى الحقيقي
+        (مش على توصيف Gemini اللي ممكن يخالف الـ timestamps).
+        """
         prompt = self._build_prompt(
             srt_text_with_timestamps,
             plain_text,
@@ -190,18 +197,376 @@ class GeminiGenerator:
                         f"خطأ الإصلاح: {repair_err}"
                     )
 
-        return self._parse_response(data, video_duration_seconds, max_clip_seconds, min_clip_seconds, max_clips)
+        # Pass extra candidates to give OpenAI verifier room to filter
+        gemini_max = max_clips * 2 if openai_api_key else max_clips
+        md = self._parse_response(data, video_duration_seconds, max_clip_seconds, min_clip_seconds, gemini_max)
+
+        # ===== OpenAI verifier =====
+        # For each clip Gemini picked, extract the actual SRT for that range
+        # and have OpenAI generate a faithful title/description + score.
+        # Gemini sometimes hallucinates titles that don't match the timestamps.
+        if openai_api_key and md.important_clips:
+            try:
+                md.important_clips = self._verify_clips_with_openai(
+                    md.important_clips,
+                    srt_text_with_timestamps,
+                    openai_api_key,
+                    target_count=max_clips,
+                )
+            except Exception as e:
+                logger.warning(f"OpenAI verification failed (kept Gemini output): {e}")
+
+        return md
+
+    def _verify_clips_with_openai(
+        self,
+        clips: List["ImportantClip"],
+        full_srt: str,
+        openai_api_key: str,
+        target_count: int,
+    ) -> List["ImportantClip"]:
+        """OpenAI verifier with key rotation.
+
+        ``openai_api_key`` may contain multiple keys separated by newlines or
+        commas. On a 429 / insufficient_quota error, the current key is marked
+        dead for the rest of the call and we fail over to the next.
+        """
+        """For each clip, extract the actual SRT text for its time range,
+        then ask OpenAI to: (1) score the clip 0-10, (2) generate a faithful
+        Arabic title/description/hook/tags from the actual content.
+
+        Replaces the Gemini-supplied title/description/etc. with OpenAI's
+        version. Returns the top `target_count` clips by score (approve only).
+        """
+        try:
+            import openai  # type: ignore
+        except ImportError:
+            logger.warning("openai package not installed; skipping verifier")
+            return clips[:target_count]
+
+        # Parse keys: split on newline or comma, strip, drop empties
+        all_keys = [k.strip() for line in openai_api_key.splitlines()
+                    for k in line.split(",")]
+        all_keys = [k for k in all_keys if k.startswith("sk-")]
+        if not all_keys:
+            logger.warning("No valid OpenAI keys found")
+            return clips[:target_count]
+        logger.info(f"OpenAI verifier: {len(all_keys)} keys available")
+        # Build a list of clients we can try in order; mark dead keys
+        dead_keys: set[int] = set()
+        clients = [openai.OpenAI(api_key=k) for k in all_keys]
+        # Index of the current key we'll try first; once we find a working one
+        # we keep using it for the rest of the call.
+        cur_idx = 0
+
+        def _call_openai(prompt: str):
+            """Call OpenAI rotating through keys on quota errors."""
+            nonlocal cur_idx
+            tried = 0
+            while tried < len(clients):
+                if cur_idx in dead_keys:
+                    cur_idx = (cur_idx + 1) % len(clients)
+                    tried += 1
+                    continue
+                try:
+                    resp = clients[cur_idx].chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[{"role": "user", "content": prompt}],
+                        response_format={"type": "json_object"},
+                        temperature=0.3,
+                    )
+                    return resp
+                except openai.RateLimitError as e:  # type: ignore
+                    err = str(e).lower()
+                    if "insufficient_quota" in err or "exceeded" in err:
+                        logger.warning(
+                            f"Key #{cur_idx + 1}/{len(clients)} dead (quota)"
+                        )
+                        dead_keys.add(cur_idx)
+                        cur_idx = (cur_idx + 1) % len(clients)
+                        tried += 1
+                        continue
+                    raise
+                except Exception:
+                    raise
+            raise RuntimeError("All OpenAI keys exhausted/dead")
+
+        client = clients[0]  # placeholder, actual calls go through _call_openai
+
+        # The SRT here is in "simple" format produced by _srt_with_simple_timestamps:
+        # each line is "[MM:SS] text" (MM is total minutes, can exceed 59).
+        # Also accept standard SRT blocks with "HH:MM:SS,mmm --> ..." for safety.
+        simple_re = re.compile(r"^\s*\[(\d+):(\d{2})\]\s*(.+)$")
+        srt_block_re = re.compile(
+            r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)"
+        )
+
+        def _excerpt(start_s: float, end_s: float) -> str:
+            texts: list[str] = []
+            # Try simple-format line-by-line first
+            for line in full_srt.splitlines():
+                m = simple_re.match(line)
+                if not m:
+                    continue
+                sec = int(m.group(1)) * 60 + int(m.group(2))
+                if sec < start_s or sec > end_s:
+                    continue
+                t = (m.group(3) or "").strip()
+                if t:
+                    texts.append(t)
+            if texts:
+                return " ".join(texts).strip()
+            # Fallback: try standard SRT block format
+            blocks = re.split(r"\n\s*\n", full_srt)
+            for b in blocks:
+                m = srt_block_re.search(b)
+                if not m:
+                    continue
+                bs = int(m[1]) * 3600 + int(m[2]) * 60 + int(m[3])
+                be = int(m[5]) * 3600 + int(m[6]) * 60 + int(m[7])
+                if be < start_s or bs > end_s:
+                    continue
+                lines = b.strip().split("\n")
+                if len(lines) >= 3:
+                    texts.append(" ".join(ln.strip() for ln in lines[2:]))
+            return " ".join(texts).strip()
+
+        scored: list[tuple[float, "ImportantClip"]] = []
+        for clip in clips:
+            excerpt = _excerpt(clip.start_seconds, clip.end_seconds)
+            if not excerpt:
+                logger.info(
+                    "OpenAI verifier: no SRT text for %.0f-%.0fs, skipping",
+                    clip.start_seconds, clip.end_seconds,
+                )
+                continue
+
+            prompt = (
+                "أنت ناقد محتوى ديني عربي تحلّل مقاطع YouTube Shorts من محاضرات إسلامية.\n"
+                "مهمتك: التعرف على موضوع المقطع وتقييم مدى صلاحيته كـ Short مستقل.\n"
+                "❌ لا تكتب عناوين أو وصف — مهمتك التحليل والتقييم فقط (Gemini سيكتب النص بعدك).\n\n"
+                f"مدة المقطع: {clip.end_seconds - clip.start_seconds:.0f} ثانية\n"
+                f"النص الفعلي للمقطع (من auto-captions، قد يحتوي أخطاء إملائية بسيطة فاحرص على فهم المعنى):\n"
+                f"---\n{excerpt}\n---\n\n"
+                "أنتج JSON يحتوي:\n"
+                "- topic_summary: جملة عربية واحدة (15-30 كلمة) تلخص الفكرة الرئيسية الموجودة فعلياً في النص.\n"
+                "- key_points: قائمة 2-4 نقاط مفتاحية ذُكرت بالنص (لاستخدامها كمرجع لـ Gemini).\n"
+                "- standalone: bool — يقف بذاته بدون سياق سابق؟\n"
+                "- score: 0-10:\n"
+                "    8-10 = مفيد ومكتفٍ بذاته\n"
+                "    5-7 = مفيد لكن يحتاج سياق\n"
+                "    0-4 = حشو/مقدمة/تكرار\n"
+                "- approve: bool — true لو score >= 7 و standalone=true\n"
+                "- reason: سبب التقييم\n\n"
+                "ارجع JSON بالظبط:\n"
+                "{\n"
+                '  "topic_summary": "ملخص جملة واحدة لموضوع المقطع",\n'
+                '  "key_points": ["نقطة 1", "نقطة 2"],\n'
+                '  "standalone": true|false,\n'
+                '  "score": رقم 0-10,\n'
+                '  "approve": true|false,\n'
+                '  "reason": "سبب التقييم"\n'
+                "}"
+            )
+            try:
+                resp = _call_openai(prompt)
+                result = json.loads(resp.choices[0].message.content or "{}")
+            except Exception as e:
+                logger.warning(f"OpenAI call failed for clip {clip.start_seconds:.0f}s: {e}")
+                continue
+
+            score = float(result.get("score", 0))
+            approve = bool(result.get("approve", False)) and score >= 6
+            topic = str(result.get("topic_summary", "")).strip()
+            key_points = [str(p).strip() for p in (result.get("key_points") or []) if p]
+            logger.info(
+                "OpenAI clip %.0f-%.0fs: score=%.1f approve=%s topic=%s",
+                clip.start_seconds, clip.end_seconds, score, approve, topic[:60],
+            )
+            if not approve:
+                continue
+
+            # ===== Stage 2: Gemini writes title/description =====
+            # OpenAI told us the actual topic; now ask Gemini to write the
+            # final marketing copy in its preferred eloquent Arabic style.
+            try:
+                gemini_text = self._gemini_write_clip_text(
+                    excerpt=excerpt,
+                    topic=topic,
+                    key_points=key_points,
+                    duration=clip.end_seconds - clip.start_seconds,
+                )
+                if gemini_text.get("title"):
+                    clip.suggested_short_title = gemini_text["title"][:100]
+                if gemini_text.get("description"):
+                    clip.description = gemini_text["description"][:1500]
+                if gemini_text.get("hook"):
+                    clip.hook = gemini_text["hook"][:60]
+                if gemini_text.get("tags"):
+                    clip.tags = list(gemini_text["tags"])[:12]
+            except Exception as e:
+                logger.warning(
+                    f"Gemini text gen failed for clip {clip.start_seconds:.0f}s "
+                    f"(keeping Gemini's original): {e}"
+                )
+
+            scored.append((score, clip))
+
+        # Sort by score descending, take top N
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top = [c for _, c in scored[:target_count]]
+        logger.info(
+            f"OpenAI verifier: {len(top)} approved out of {len(clips)} candidates "
+            f"(target {target_count})"
+        )
+        return top
+
+    def _gemini_write_clip_text(
+        self,
+        excerpt: str,
+        topic: str,
+        key_points: list,
+        duration: float,
+    ) -> dict:
+        """Use Gemini (better at eloquent Arabic) to write the title/description/hook/tags
+        for a Short, given the actual SRT excerpt + OpenAI's topic identification.
+
+        Returns: {"title": str, "description": str, "hook": str, "tags": [str]}
+        """
+        kp_block = "\n".join(f"  • {p}" for p in (key_points or []))
+        prompt = (
+            "أنت متخصص في كتابة عناوين وأوصاف YouTube Shorts عربية بأسلوب فصيح موقّر "
+            "يجذب المشاهد بدون ابتذال.\n\n"
+            f"مدة المقطع: {duration:.0f} ثانية\n"
+            f"موضوع المقطع (مُحدَّد بدقة): {topic}\n"
+            f"النقاط الرئيسية الفعلية:\n{kp_block}\n\n"
+            "النص الفعلي للمقطع (auto-captions، صحّح أخطاء واضحة عند الإشارة لها):\n"
+            f"---\n{excerpt}\n---\n\n"
+            "اكتب JSON بالظبط:\n"
+            "{\n"
+            '  "title": "عنوان عربي فصيح ≤80 حرف، يثير الفضول، مبني على النص الفعلي والموضوع المحدد",\n'
+            '  "description": "وصف 3-5 جمل عربية فصيحة، يشرح الفائدة الفعلية في المقطع، يذكر فضيلة الشيخ أبو حفص الأثري والقناة، وينتهي بدعوة لمتابعة المحاضرة كاملة. لا روابط ولا تكرار.",\n'
+            '  "hook": "كلمتين أو ثلاثة قوية كهوك على الصورة",\n'
+            '  "tags": ["8-12 وسم عربي مبني على المحتوى الفعلي، بدون _ أو -"]\n'
+            "}\n\n"
+            "قواعد:\n"
+            "- العنوان والوصف لازم يكونا مطابقين للنص الفعلي والموضوع المحدد، مش يبتكر مواضيع غير موجودة.\n"
+            "- العنوان فصيح موقّر — لا تهويل ولا أسئلة سطحية.\n"
+            "- الوسوم: عبارات عربية طبيعية بفراغات (مثلاً: \"محبة الله\"، \"دعاء المصيبة\")، ممنوع underscore أو شَرطة."
+        )
+
+        # Try with rotation across the existing Gemini keys
+        last_err: Optional[Exception] = None
+        for attempt in range(len(self.api_keys)):
+            try:
+                resp = self.model.generate_content(
+                    prompt,
+                    generation_config=genai.GenerationConfig(
+                        response_mime_type="application/json",
+                        temperature=0.6,
+                    ),
+                )
+                txt = resp.text or "{}"
+                data = json.loads(txt)
+                title = str(data.get("title", "")).strip()
+                desc = str(data.get("description", "")).strip()
+                hook = str(data.get("hook", "")).strip()
+                raw_tags = data.get("tags") or []
+                tags: list[str] = []
+                seen = set()
+                for t in raw_tags:
+                    if not isinstance(t, (str, int, float)):
+                        continue
+                    tc = str(t).strip().lstrip("#")
+                    if not tc or tc.lower() in seen:
+                        continue
+                    seen.add(tc.lower())
+                    tags.append(tc)
+                return {"title": title, "description": desc, "hook": hook, "tags": tags}
+            except Exception as e:
+                last_err = e
+                err_str = str(e).lower()
+                if "rate" in err_str or "quota" in err_str or "429" in err_str:
+                    self._rotate_key()
+                    continue
+                raise
+        if last_err is not None:
+            raise last_err
+        return {}
 
     # المعايير الافتراضية لاختيار مقاطع Shorts (تُستخدم لو ما اتبعتش من config)
     DEFAULT_SHORTS_SELECTION_HINT = (
+        "🚫 ممنوع منعاً باتاً اختيار مقاطع من المقدمة (أول 15% من الفيديو) أو الخاتمة (آخر 10%).\n"
+        "✅ المقاطع لازم تكون من **منتصف المحاضرة** فقط — تحديداً بين 15% و 90% من إجمالي مدة الفيديو.\n"
+        "   مثال: لو الفيديو 60 دقيقة (3600 ثانية)، اختر فقط بين الثانية 540 (15%) والثانية 3240 (90%).\n"
         "- يحتوي على فائدة مكثفة قابلة للاقتباس (نقطة واحدة واضحة لا تشتيت).\n"
         "- يفتح بهوك قوي خلال أول 3 ثواني: سؤال صادم، حكم قاطع، قصة مؤثرة، نتيجة مفاجئة، أو كلمة قوية.\n"
         "- يقف بذاته بدون الحاجة لخلفية أو سياق سابق (السامع يفهم من غير ما يكون شاف الفيديو الأصلي).\n"
         "- يغطي فكرة واحدة فقط بشكل كامل ومرتب (لا تعدد ولا أفكار متفرعة).\n"
         "- يُفضّل: حكم شرعي واضح، قصة من السلف، رد على شبهة، تحذير قاطع، فائدة لغوية أو حديثية مذهلة، إجابة مختصرة عن سؤال شائع.\n"
-        "- يُتجنّب: التمهيدات والمقدمات، السرد الطويل بدون لب، ذكر أسانيد مطولة بدون فائدة عملية للمستمع.\n"
+        "- يُتجنّب تماماً: المقدمات وذكر اسم الشيخ والترحيب والتقديم والبسملة والحمدلة الافتتاحية،\n"
+        "  السرد الطويل بدون لب، ذكر أسانيد مطولة بدون فائدة عملية للمستمع، الخاتمة والدعاء وآخر المحاضرة.\n"
+        "- المقاطع المختارة لازم تكون موزّعة على المنتصف — لا تختار 3 مقاطع متجاورة، بل من مواضع مختلفة.\n"
         "- المدة المثالية 30-50 ثانية (الحد الأدنى المطلق والأقصى محددان أدناه)."
     )
+
+    @staticmethod
+    def _filter_srt_to_middle(
+        srt_text: str, duration: float,
+        intro_pct: float = 0.15, outro_pct: float = 0.90,
+    ) -> str:
+        """Keep only SRT lines whose timestamp is in [intro_pct, outro_pct] of duration.
+
+        Supports two formats:
+        - Simple "[MM:SS] text" (one line per cue, total minutes can exceed 59)
+        - Standard SRT blocks "HH:MM:SS,mmm --> HH:MM:SS,mmm\\ntext"
+
+        This prevents the model from "anchoring" on early intro lines.
+        """
+        if duration <= 0:
+            return srt_text
+        intro_cutoff = duration * intro_pct
+        outro_cutoff = duration * outro_pct
+
+        # Detect simple format (line-based, "[MM:SS] text")
+        simple_re = re.compile(r"^\s*\[(\d+):(\d{2})\]")
+        srt_block_re = re.compile(
+            r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)"
+        )
+
+        # Try simple format first
+        simple_lines = [ln for ln in srt_text.splitlines() if simple_re.match(ln)]
+        if simple_lines:
+            kept = []
+            for ln in srt_text.splitlines():
+                m = simple_re.match(ln)
+                if not m:
+                    # Non-timestamped line — drop (it's noise in simple format)
+                    continue
+                sec = int(m.group(1)) * 60 + int(m.group(2))
+                if sec < intro_cutoff or sec > outro_cutoff:
+                    continue
+                kept.append(ln)
+            return "\n".join(kept)
+
+        # Fallback: standard SRT block format
+        blocks = re.split(r"\n\s*\n", srt_text)
+        kept_blocks: list[str] = []
+        for b in blocks:
+            b = b.strip()
+            if not b:
+                continue
+            m = srt_block_re.search(b)
+            if not m:
+                kept_blocks.append(b)
+                continue
+            start_sec = (
+                int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+            )
+            if start_sec < intro_cutoff or start_sec > outro_cutoff:
+                continue
+            kept_blocks.append(b)
+        return "\n\n".join(kept_blocks)
 
     def _build_prompt(
         self,
@@ -218,11 +583,33 @@ class GeminiGenerator:
         description_template_hint: str = "",
         shorts_selection_hint: str = "",
     ) -> str:
-        # اقطع النص لو طويل جداً
+        # CRITICAL: For Shorts selection to actually pick from the middle, hide
+        # the intro/outro from the model entirely. Truncating the full SRT to
+        # 30000 chars from the start would mean Gemini only sees the intro on
+        # long videos. Instead we filter to the middle BEFORE truncating.
+        full_srt_for_chapters = srt_with_ts  # keep full for chapter reasoning
+        srt_with_ts = self._filter_srt_to_middle(srt_with_ts, duration)
+
+        # اقطع النص لو طويل جداً (sample evenly to span the middle, not just the start)
+        def _sample_evenly(text: str, max_chars: int) -> str:
+            if len(text) <= max_chars:
+                return text
+            blocks = re.split(r"\n\s*\n", text)
+            if len(blocks) <= 1:
+                return text[:max_chars] + "..."
+            # Pick blocks at even stride to span the middle window
+            target_blocks = max_chars // max(1, (len(text) // max(1, len(blocks))))
+            stride = max(1, len(blocks) // max(1, target_blocks))
+            sampled = blocks[::stride]
+            out = "\n\n".join(sampled)
+            if len(out) > max_chars:
+                out = out[:max_chars]
+            return out
+
         if len(plain_text) > 30000:
             plain_text = plain_text[:30000] + "..."
         if len(srt_with_ts) > 30000:
-            srt_with_ts = srt_with_ts[:30000] + "..."
+            srt_with_ts = _sample_evenly(srt_with_ts, 30000)
 
         chapters_instr = (
             f"6. chapters: قائمة بـ 3-7 فصول. كل فصل {{timestamp: \"MM:SS\", title: \"عنوان الفصل\"}}. "
@@ -342,6 +729,13 @@ class GeminiGenerator:
                 chapters.append(Chapter(timestamp=ts, title=t))
 
         clips: List[ImportantClip] = []
+        # Reject clips that fall in the intro (first 15%) or outro (last 10%)
+        # to avoid the boring "اسمي/مقدمتي/أهلاً وسهلاً" segments that Gemini
+        # sometimes still picks. We allow some tolerance — if the model starts
+        # at e.g. 12% but the clip mostly extends into the middle, we keep it.
+        intro_cutoff = video_duration * 0.15
+        outro_cutoff = video_duration * 0.90
+        rejected_intro = 0
         for c in data.get("important_clips", []) or []:
             try:
                 s = float(c.get("start_seconds", 0))
@@ -350,6 +744,19 @@ class GeminiGenerator:
                 continue
             # ضمان الحدود
             if e <= s:
+                continue
+            # Reject intro/outro picks
+            if s < intro_cutoff:
+                logger.info(
+                    "rejecting intro clip start=%.1fs (cutoff=%.1fs)", s, intro_cutoff,
+                )
+                rejected_intro += 1
+                continue
+            if s > outro_cutoff:
+                logger.info(
+                    "rejecting outro clip start=%.1fs (cutoff=%.1fs)", s, outro_cutoff,
+                )
+                rejected_intro += 1
                 continue
             duration_clip = e - s
             # قص لو طويل أوي

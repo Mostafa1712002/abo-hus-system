@@ -61,7 +61,65 @@ def find_videos(input_dir: Path, scan_subfolders: bool = False) -> list:
         files = [p for p in input_dir.rglob("*") if p.is_file() and p.suffix.lower() in extensions]
     else:
         files = [p for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() in extensions]
-    return sorted(files, key=lambda p: (_natural_key(str(p.parent)), _natural_key(p.name)))
+    # If both <stem>.rmvb (or .rm) and <stem>.mp4 exist, prefer the .mp4 —
+    # we transcode .rmvb→.mp4 for quality and the .mp4 is the canonical version.
+    by_stem: dict[tuple[str, str], Path] = {}
+    for p in files:
+        key = (str(p.parent), p.stem)
+        old = by_stem.get(key)
+        if old is None:
+            by_stem[key] = p
+            continue
+        # Prefer .mp4 over legacy formats
+        legacy = {".rmvb", ".rm"}
+        if old.suffix.lower() in legacy and p.suffix.lower() not in legacy:
+            by_stem[key] = p
+        elif p.suffix.lower() in legacy and old.suffix.lower() not in legacy:
+            pass  # keep old
+    deduped = list(by_stem.values())
+    return sorted(deduped, key=lambda p: (_natural_key(str(p.parent)), _natural_key(p.name)))
+
+
+def transcode_to_mp4(src: Path, dst: Path) -> bool:
+    """Transcode a low-quality source (e.g. .rmvb) to high-quality .mp4.
+
+    Filters: hqdn3d denoising + slight unsharp mask + scale-and-pad to 1280x720.
+    Encoding: libx264 medium / CRF 20 / High profile / 192k AAC.
+
+    Returns True on success. The output is written atomically via a .tmp.mp4
+    intermediate, so a Ctrl+C / crash won't leave a half-written .mp4 lying
+    around to be uploaded.
+    """
+    import subprocess
+    if dst.exists() and dst.stat().st_size > 1024 * 1024:
+        return True
+    tmp = dst.with_suffix(".tmp.mp4")
+    cmd = [
+        "ffmpeg", "-y", "-i", str(src),
+        "-vf", (
+            "hqdn3d=4:3:6:4.5,"
+            "unsharp=5:5:0.7:5:5:0.0,"
+            "scale=1280:720:force_original_aspect_ratio=decrease,"
+            "pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,"
+            "setsar=1"
+        ),
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-profile:v", "high", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+        "-f", "mp4",
+        str(tmp),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            encoding="utf-8", errors="replace")
+    if result.returncode == 0 and tmp.exists() and tmp.stat().st_size > 1024 * 1024:
+        tmp.replace(dst)
+        return True
+    if tmp.exists():
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return False
 
 
 def cmd_upload(cfg: Config, video_path: Path):
@@ -85,9 +143,33 @@ def cmd_upload_batch(cfg: Config, series: str = "", limit: int = 1, day_offset: 
     scan_sub = cfg.get("paths", "scan_subfolders", default=False)
     if series:
         target_dir = input_dir / series
-        if not target_dir.exists():
-            console.print(f"[red]السلسلة غير موجودة: {target_dir}[/]")
-            sys.exit(1)
+        if not target_dir.exists() or not any(target_dir.iterdir()):
+            # Workspace missing/empty — try to extract from cold-storage zip.
+            from src.cold_storage import ColdStorage
+            cold = ColdStorage.from_config(cfg)
+            if cold.enabled and (cold.type or "").lower() == "zipped":
+                try:
+                    zip_path = cold._fetch_zip_if_needed(series)
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    import zipfile, shutil
+                    with zipfile.ZipFile(zip_path, "r") as zf:
+                        for member in zf.infolist():
+                            if member.is_dir():
+                                continue
+                            name = Path(member.filename).name
+                            dest = target_dir / name
+                            if dest.exists():
+                                continue
+                            with zf.open(member) as src, dest.open("wb") as dst:
+                                shutil.copyfileobj(src, dst, length=1024 * 1024)
+                    console.print(f"[green]✓ تم استخراج {series} من الـ zip[/]")
+                except Exception as e:
+                    console.print(f"[red]السلسلة غير موجودة: {target_dir}[/]")
+                    console.print(f"[red]وفشل استخراجها من cold-storage: {e}[/]")
+                    sys.exit(1)
+            else:
+                console.print(f"[red]السلسلة غير موجودة: {target_dir}[/]")
+                sys.exit(1)
         videos = find_videos(target_dir, scan_subfolders=False)
     else:
         videos = find_videos(input_dir, scan_subfolders=scan_sub)
@@ -96,9 +178,71 @@ def cmd_upload_batch(cfg: Config, series: str = "", limit: int = 1, day_offset: 
         return
     tracker = PendingTracker(get_pending_path(cfg))
     uploaded_paths = {p.original_path for p in tracker.all()}
-    videos = [v for v in videos if str(v) not in uploaded_paths]
+    # Also dedup against archived (completed/failed) entries by basename stem
+    # so we don't re-upload the same lesson with a different extension/path
+    # (e.g. "الرسالة 1.mp4" archived → skip "الرسالة 1.rmvb" extracted now).
+    archived_stems: set[str] = set()
+    archive_dir = Path(get_pending_path(cfg)).parent / "archive"
+    if archive_dir.exists():
+        import json as _json
+        for f in archive_dir.glob("*.jsonl"):
+            try:
+                for line in f.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        d = _json.loads(line)
+                        name = (d.get("original_name") or "").strip()
+                        srs = (d.get("series") or "").strip()
+                        if name and srs:
+                            archived_stems.add(f"{srs}/{Path(name).stem}")
+                    except _json.JSONDecodeError:
+                        pass
+            except OSError:
+                pass
+
+    def _is_already_uploaded(v: Path) -> bool:
+        if str(v) in uploaded_paths:
+            return True
+        # Match by series+stem against archive
+        try:
+            v_series = v.parent.name
+            stem_key = f"{v_series}/{v.stem}"
+            if stem_key in archived_stems:
+                return True
+        except Exception:
+            pass
+        return False
+
+    skipped = [v for v in videos if _is_already_uploaded(v)]
+    if skipped:
+        console.print(f"[yellow]هتم تخطي {len(skipped)} فيديو سبق رفعهم[/]")
+        for v in skipped[:5]:
+            console.print(f"  - {v.name}")
+    videos = [v for v in videos if not _is_already_uploaded(v)]
     if limit:
         videos = videos[:limit]
+
+    # Transcode .rmvb / .rm legacy formats to high-quality .mp4 before upload.
+    # We pick MP4 because YouTube re-encodes from .rmvb sources poorly.
+    legacy_exts = {".rmvb", ".rm"}
+    transcoded_videos: list[Path] = []
+    for v in videos:
+        if v.suffix.lower() in legacy_exts:
+            mp4 = v.with_suffix(".mp4")
+            if not mp4.exists() or mp4.stat().st_size < 1024 * 1024:
+                console.print(f"[cyan]→ transcoding {v.name} ({v.stat().st_size/1024/1024:.0f} MB) → {mp4.name}[/]")
+                ok = transcode_to_mp4(v, mp4)
+                if not ok:
+                    console.print(f"[red]✗ فشل تحويل {v.name} — هترفعه كما هو[/]")
+                    transcoded_videos.append(v)
+                    continue
+                console.print(f"[green]✓ تم التحويل: {mp4.stat().st_size/1024/1024:.0f} MB[/]")
+            transcoded_videos.append(mp4)
+        else:
+            transcoded_videos.append(v)
+    videos = transcoded_videos
+
     console.print(f"[green]هرفع {len(videos)} فيديو[/]")
     youtube = get_youtube(cfg)
 

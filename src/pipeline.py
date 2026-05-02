@@ -148,6 +148,13 @@ def _build_fb_main_description(title: str, body: str, series: str = "",
             "وكونوا أول من يصلكم الجديد."
         )
     parts.append("")
+    parts.append(
+        "🔔 لمتابعتنا على باقي المنصات:\n"
+        "▪ يوتيوب: https://www.youtube.com/@abohafs.elaraby\n"
+        "▪ تليجرام: https://t.me/abohafs_elaraby\n"
+        "▪ إنستجرام: https://www.instagram.com/abohafs.elaraby/"
+    )
+    parts.append("")
     parts.append(" ".join(FB_BRAND_HASHTAGS))
     return "\n".join(parts).strip()
 
@@ -262,11 +269,13 @@ def _get_meta_creds(cfg: Config) -> dict | None:
 
 
 def _build_reel_caption(base_text: str, parent_url: str | None = None) -> str:
-    """يبني caption لـ FB/IG Reel: نص + parent URL + hashtags."""
+    """يبني caption لـ FB/IG Reel: نص + parent URL + follow CTA + hashtags."""
     parts = [base_text.strip()] if base_text else []
     if parent_url:
         parts.append("")
         parts.append(f"المحاضرة كاملةً: {parent_url}")
+    parts.append("")
+    parts.append("🔔 تابعنا للجديد @abohafs.elaraby")
     parts.append("")
     parts.append(" ".join(_REEL_HASHTAGS))
     caption = "\n".join(parts).strip()
@@ -308,6 +317,7 @@ def _build_telegram_caption(base_text: str, parent_url: str | None = None,
     if parent_url:
         label = "المحاضرة كاملةً" if not is_short else "المقطع ضمن المحاضرة الكاملة"
         parts.append(f"{label}: {parent_url}")
+    parts.append("🔔 اشترك في قناتنا للجديد: @abohafs_elaraby")
     parts.append(" ".join(_TELEGRAM_HASHTAGS))
 
     caption = "\n\n".join(p for p in parts if p).strip()
@@ -1133,6 +1143,15 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
         api_key=cfg.gemini_api_key,
         api_keys=rotation_keys if rotation_keys else None,
     )
+    # Load OpenAI key (optional verifier layer)
+    openai_key = ""
+    try:
+        openai_key_path = Path(__file__).resolve().parent.parent / "credentials" / "openai_key.txt"
+        if openai_key_path.exists():
+            openai_key = openai_key_path.read_text(encoding="utf-8").strip()
+    except Exception as e:
+        logger.warning(f"OpenAI key load failed: {e}")
+
     md = gemini.generate(
         srt_text_with_timestamps=with_ts,
         plain_text=plain,
@@ -1146,6 +1165,7 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
         content_context=cfg.ai_prompts.get("content_context", ""),
         description_template_hint=cfg.ai_prompts.get("description_template_hint", ""),
         shorts_selection_hint=cfg.ai_prompts.get("shorts_selection_hint", ""),
+        openai_api_key=openai_key,
     )
     md_path = Path(paths["output_metadata"]) / f"{base}.json"
     md_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1154,6 +1174,17 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
     logger.info(f"✓ العنوان: {md.title}")
 
     full_description = md.description_with_chapters()
+    # ===== Append CTA footer with subscribe + cross-platform follow links =====
+    yt_cta_footer = (
+        "\n\n━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🔔 اشترك في قناتنا وفعّل الجرس ليصلك كل جديد:\n"
+        "https://www.youtube.com/@abohafs.elaraby?sub_confirmation=1\n\n"
+        "📱 تابعنا على باقي المنصات:\n"
+        "▪ Facebook: https://www.facebook.com/profile.php?id=100910031570983\n"
+        "▪ Instagram: https://www.instagram.com/abohafs.elaraby/\n"
+        "▪ Telegram: https://t.me/abohafs_elaraby"
+    )
+    full_description = (full_description.rstrip() + yt_cta_footer)[:4900]
     yt_cfg = cfg.youtube
     tags = normalize_tags(md.hashtags + list(yt_cfg.get("default_tags", []) or []), max_count=30)
     update_video_metadata(youtube=youtube, video_id=item.video_id,
@@ -1192,8 +1223,10 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
             logger.warning(f"فشل thumbnail: {e}")
 
     # ===== رفع الفيديو الكامل على Facebook Page (لو enabled) =====
-    fb_main_video_id: str | None = None
-    tg_main_message_id: int | None = None
+    # Idempotency: skip if already uploaded in a prior run
+    prior_meta = item.metadata if isinstance(item.metadata, dict) else {}
+    fb_main_video_id: str | None = prior_meta.get("fb_main_video_id") or None
+    tg_main_message_id: int | None = prior_meta.get("tg_main_message_id") or None
     yt_url = f"https://youtu.be/{item.video_id}"
     series_for_tg = (item.series or "").strip()
     # احسب التشويق للفيديو القادم في نفس السلسلة (مشترك بين FB + Telegram)
@@ -1201,7 +1234,9 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
         cfg=cfg, current_video_path=Path(item.original_path),
         series=series_for_tg,
     )
-    if Path(original_local).exists():
+    if fb_main_video_id:
+        logger.info(f"FB main video already uploaded: {fb_main_video_id} (skipping)")
+    elif Path(original_local).exists():
         fb_main_video_id = _publish_full_video_to_fb(
             cfg=cfg,
             video_path=Path(original_local),
@@ -1229,16 +1264,20 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
         logger.warning(f"فشل جعل الفيديو علنياً (سيظل مجدولاً): {e}")
 
     # ===== Telegram (منشور إعلان نصي + رابط YouTube — مش رفع للملف) =====
-    # لا نشترط وجود الملف الأصلي لأننا بنبعت نص فقط
-    tg_main_message_id = _publish_full_video_to_telegram(
-        cfg=cfg,
-        video_path=Path(original_local),
-        title=md.title,
-        description=full_description,
-        yt_url=yt_url,
-        series=series_for_tg,
-        next_video_teaser=next_teaser,
-    )
+    # Idempotency: skip if already posted in a prior run
+    if tg_main_message_id:
+        logger.info(f"TG main message already posted: {tg_main_message_id} (skipping)")
+    else:
+        # لا نشترط وجود الملف الأصلي لأننا بنبعت نص فقط
+        tg_main_message_id = _publish_full_video_to_telegram(
+            cfg=cfg,
+            video_path=Path(original_local),
+            title=md.title,
+            description=full_description,
+            yt_url=yt_url,
+            series=series_for_tg,
+            next_video_teaser=next_teaser,
+        )
 
     uploaded_shorts: list[str] = []
     fb_short_video_ids: list[str] = []
@@ -1271,10 +1310,15 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
             )
 
     # ===== نشر اقتباسات نصية على Telegram (3-5 منشورات) =====
-    tg_quote_message_ids: list[int] = []
+    # Idempotency: if quotes were already posted in a prior run, skip to avoid
+    # duplicate posts on the channel.
+    tg_quote_message_ids: list[int] = list(prior_meta.get("tg_quote_message_ids", []) or [])
+    if tg_quote_message_ids:
+        logger.info(f"TG quotes already posted ({len(tg_quote_message_ids)}): skipping")
     try:
         tg_cfg = cfg.get("telegram", default={}) or {}
-        if (tg_cfg.get("enabled", False)
+        if (not tg_quote_message_ids
+                and tg_cfg.get("enabled", False)
                 and tg_cfg.get("publish_text_quotes", True)
                 and md.text_quotes):
             target_count = int(tg_cfg.get("quotes_count", 4))
