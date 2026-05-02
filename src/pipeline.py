@@ -1036,7 +1036,9 @@ def process_pending(cfg: Config, video_id: Optional[str] = None) -> dict:
     for item in pending:
         try:
             logger.info(f"--- {item.video_id} ({item.original_name}) ---")
-            srt_text = _try_download_captions(youtube, item.video_id)
+            # Pass cached SRT path so we can skip the YT API call on retries
+            cached_srt = Path(cfg.paths["output_srt"]) / f"{Path(item.original_name).stem}.srt"
+            srt_text = _try_download_captions(youtube, item.video_id, cached_srt_path=cached_srt)
             if not srt_text:
                 logger.info("captions مش جاهزة لسه")
                 tracker.update(item.video_id, captions_checked_count=item.captions_checked_count + 1)
@@ -1053,7 +1055,16 @@ def process_pending(cfg: Config, video_id: Optional[str] = None) -> dict:
             "not_ready": not_ready, "failed": failed}
 
 
-def _try_download_captions(youtube, video_id: str) -> Optional[str]:
+def _try_download_captions(youtube, video_id: str, cached_srt_path: Optional[Path] = None) -> Optional[str]:
+    # 0th: cached SRT on disk (avoids hitting YT API on retries)
+    if cached_srt_path and cached_srt_path.exists():
+        try:
+            cached = cached_srt_path.read_text(encoding="utf-8")
+            if cached.strip():
+                logger.info(f"using cached SRT: {cached_srt_path}")
+                return cached
+        except OSError:
+            pass
     cap = get_auto_caption(youtube, video_id, language="ar")
     if cap:
         srt = download_caption(youtube, cap["id"], fmt="srt")
