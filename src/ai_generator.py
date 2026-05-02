@@ -201,6 +201,18 @@ class GeminiGenerator:
         gemini_max = max_clips * 2 if openai_api_key else max_clips
         md = self._parse_response(data, video_duration_seconds, max_clip_seconds, min_clip_seconds, gemini_max)
 
+        # ===== Hallucination check =====
+        # Gemini sometimes returns timestamps that don't exist in the SRT we
+        # actually sent it (e.g. picks "17s" when the filter hid everything
+        # before 12:41). Validate each clip's start_seconds against the SRT
+        # by ensuring there's at least one transcript line within ±5s of it.
+        try:
+            md.important_clips = self._reject_hallucinated_clips(
+                md.important_clips, srt_text_with_timestamps,
+            )
+        except Exception as e:
+            logger.warning(f"Hallucination check failed (skipping): {e}")
+
         # ===== OpenAI verifier =====
         # For each clip Gemini picked, extract the actual SRT for that range
         # and have OpenAI generate a faithful title/description + score.
@@ -420,6 +432,59 @@ class GeminiGenerator:
             f"(target {target_count})"
         )
         return top
+
+    @staticmethod
+    def _reject_hallucinated_clips(
+        clips: List["ImportantClip"], srt_text: str, window_s: float = 5.0,
+    ) -> List["ImportantClip"]:
+        """Reject clips whose start_seconds doesn't correspond to any SRT
+        line within ``window_s`` seconds. Catches Gemini hallucinations
+        (returning timestamps that don't exist in the input SRT).
+        """
+        # Parse all timestamps from the SRT (simple [MM:SS] or block format)
+        timestamps: list[float] = []
+        simple_re = re.compile(r"^\s*\[(\d+):(\d{2})\]")
+        for line in srt_text.splitlines():
+            m = simple_re.match(line)
+            if m:
+                timestamps.append(int(m.group(1)) * 60 + int(m.group(2)))
+        if not timestamps:
+            # Fallback to standard SRT block format
+            block_re = re.compile(
+                r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->"
+            )
+            for m in block_re.finditer(srt_text):
+                timestamps.append(
+                    int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+                )
+        if not timestamps:
+            return clips  # nothing to validate against; pass through
+
+        timestamps.sort()
+        kept: list["ImportantClip"] = []
+        for clip in clips:
+            # Binary search for nearest timestamp
+            import bisect
+            idx = bisect.bisect_left(timestamps, clip.start_seconds)
+            candidates = []
+            if idx > 0:
+                candidates.append(timestamps[idx - 1])
+            if idx < len(timestamps):
+                candidates.append(timestamps[idx])
+            nearest_dist = min(abs(t - clip.start_seconds) for t in candidates) if candidates else 1e9
+            if nearest_dist > window_s:
+                logger.info(
+                    "rejecting hallucinated clip start=%.0fs (nearest SRT line %.0fs away)",
+                    clip.start_seconds, nearest_dist,
+                )
+                continue
+            kept.append(clip)
+        if len(kept) < len(clips):
+            logger.info(
+                "hallucination check: kept %d/%d clips",
+                len(kept), len(clips),
+            )
+        return kept
 
     def _gemini_write_clip_text(
         self,
