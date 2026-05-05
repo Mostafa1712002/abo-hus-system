@@ -1229,6 +1229,9 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
         description_template_hint=cfg.ai_prompts.get("description_template_hint", ""),
         shorts_selection_hint=cfg.ai_prompts.get("shorts_selection_hint", ""),
         openai_api_key=openai_key,
+        speaker_honorifics=(cfg.get("channel_branding", default={}) or {}).get(
+            "speaker_honorifics", []
+        ) or [],
     )
     md_path = Path(paths["output_metadata"]) / f"{base}.json"
     md_path.parent.mkdir(parents=True, exist_ok=True)

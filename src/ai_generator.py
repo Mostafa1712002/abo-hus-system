@@ -112,6 +112,7 @@ class GeminiGenerator:
         description_template_hint: str = "",
         shorts_selection_hint: str = "",
         openai_api_key: str = "",
+        speaker_honorifics: Optional[List[str]] = None,
     ) -> VideoMetadata:
         """يولد كل الـ metadata في call واحدة (لتقليل عدد الطلبات).
 
@@ -120,6 +121,9 @@ class GeminiGenerator:
         ونطلب من OpenAI يولّد title/description مبنيين على المحتوى الحقيقي
         (مش على توصيف Gemini اللي ممكن يخالف الـ timestamps).
         """
+        # Cache the honorifics on the instance so the per-clip writer can reuse
+        # them without needing them threaded through every internal call.
+        self._speaker_honorifics = list(speaker_honorifics or [])
         prompt = self._build_prompt(
             srt_text_with_timestamps,
             plain_text,
@@ -133,6 +137,7 @@ class GeminiGenerator:
             content_context,
             description_template_hint,
             shorts_selection_hint,
+            speaker_honorifics=self._speaker_honorifics,
         )
 
         logger.info(f"إرسال الطلب لـ Gemini ({self.model_name}, key #{self._key_idx + 1}/{len(self.api_keys)})...")
@@ -499,24 +504,36 @@ class GeminiGenerator:
         Returns: {"title": str, "description": str, "hook": str, "tags": [str]}
         """
         kp_block = "\n".join(f"  • {p}" for p in (key_points or []))
+        honorifics = getattr(self, "_speaker_honorifics", []) or []
+        honorifics_rule = ""
+        if honorifics:
+            honor_list = "\n".join(f'   • "{h}"' for h in honorifics)
+            honorifics_rule = (
+                "\nألقاب الشيخ المعتمدة (اختر **واحداً فقط** يناسب موضوع هذا المقطع، ونوّع بين المقاطع):\n"
+                f"{honor_list}\n"
+                "🚫 ممنوع كتابة \"الشيخ\" مجردة. استخدم لقباً من القائمة (مثل المحدث/العلامة/الفقيه/فضيلة).\n"
+                "اختر اللقب الأنسب: المحدث للأحاديث، العلامة/الفقيه للأحكام، فضيلة الشيخ ... الأثري للعام.\n"
+            )
         prompt = (
             "أنت متخصص في كتابة عناوين وأوصاف YouTube Shorts عربية بأسلوب فصيح موقّر "
             "يجذب المشاهد بدون ابتذال.\n\n"
             f"مدة المقطع: {duration:.0f} ثانية\n"
             f"موضوع المقطع (مُحدَّد بدقة): {topic}\n"
-            f"النقاط الرئيسية الفعلية:\n{kp_block}\n\n"
+            f"النقاط الرئيسية الفعلية:\n{kp_block}\n"
+            f"{honorifics_rule}\n"
             "النص الفعلي للمقطع (auto-captions، صحّح أخطاء واضحة عند الإشارة لها):\n"
             f"---\n{excerpt}\n---\n\n"
             "اكتب JSON بالظبط:\n"
             "{\n"
             '  "title": "عنوان عربي فصيح ≤80 حرف، يثير الفضول، مبني على النص الفعلي والموضوع المحدد",\n'
-            '  "description": "وصف 3-5 جمل عربية فصيحة، يشرح الفائدة الفعلية في المقطع، يذكر فضيلة الشيخ أبو حفص الأثري والقناة، وينتهي بدعوة لمتابعة المحاضرة كاملة. لا روابط ولا تكرار.",\n'
+            '  "description": "وصف 3-5 جمل عربية فصيحة، يشرح الفائدة الفعلية في المقطع، يذكر الشيخ بلقب من القائمة أعلاه والقناة، وينتهي بدعوة لمتابعة المحاضرة كاملة. لا روابط ولا تكرار.",\n'
             '  "hook": "كلمتين أو ثلاثة قوية كهوك على الصورة",\n'
             '  "tags": ["8-12 وسم عربي مبني على المحتوى الفعلي، بدون _ أو -"]\n'
             "}\n\n"
             "قواعد:\n"
             "- العنوان والوصف لازم يكونا مطابقين للنص الفعلي والموضوع المحدد، مش يبتكر مواضيع غير موجودة.\n"
             "- العنوان فصيح موقّر — لا تهويل ولا أسئلة سطحية.\n"
+            "- لو ذُكر الشيخ في العنوان أو الوصف، استخدم لقباً من القائمة (ممنوع \"الشيخ\" مجردة).\n"
             "- الوسوم: عبارات عربية طبيعية بفراغات (مثلاً: \"محبة الله\"، \"دعاء المصيبة\")، ممنوع underscore أو شَرطة."
         )
 
@@ -647,6 +664,7 @@ class GeminiGenerator:
         content_context: str = "",
         description_template_hint: str = "",
         shorts_selection_hint: str = "",
+        speaker_honorifics: Optional[List[str]] = None,
     ) -> str:
         # CRITICAL: For Shorts selection to actually pick from the middle, hide
         # the intro/outro from the model entirely. Truncating the full SRT to
@@ -693,9 +711,24 @@ class GeminiGenerator:
         if description_template_hint:
             desc_hint_block = f"\nإرشاد لبنية الوصف: {description_template_hint.strip()}\n"
 
+        honorifics_block = ""
+        if speaker_honorifics:
+            honor_list = "\n".join(f'   • "{h}"' for h in speaker_honorifics)
+            honorifics_block = (
+                "\nألقاب الشيخ المعتمدة (اختر **واحداً فقط** يناسب موضوع هذا الفيديو):\n"
+                f"{honor_list}\n"
+                "🚫 ممنوع منعاً باتاً كتابة كلمة \"الشيخ\" مجردة (بدون لقب أو إضافة بعدها) "
+                "في أي عنوان أو وصف أو اقتباس أو نص short.\n"
+                "✅ لازم تستخدم لقباً من القائمة أعلاه — ونوّع بين الفيديوهات حسب موضوع كل واحد:\n"
+                "   - فيديو فيه أحاديث/أسانيد → فضّل \"المحدث\"\n"
+                "   - فيديو فقهي/أحكام → فضّل \"العلامة\" أو \"الفقيه\"\n"
+                "   - فيديو عام أو وعظ → فضّل \"فضيلة الشيخ ... الأثري\"\n"
+                "   - لا تكرر نفس اللقب في كل العناوين، نوّع.\n"
+            )
+
         return f"""أنت مساعد متخصص في تحسين فيديوهات يوتيوب العربية وصناعة Shorts قوية تصل للمشاهد بسرعة.
 هذه ترجمة فيديو مدته {duration:.0f} ثانية تقريباً. اقرأها بعناية وأنتج البيانات المطلوبة.
-{context_block}{desc_hint_block}
+{context_block}{desc_hint_block}{honorifics_block}
 ---
 الترجمة مع التوقيتات:
 {srt_with_ts}
@@ -719,7 +752,7 @@ class GeminiGenerator:
       "suggested_short_title": "عنوان جذاب لـ Short",
       "hook": "كلمتين أو ثلاثة قوية تصلح كـ caption على الـ thumbnail",
       "description": "3-5 جمل عربية فصيحة تشرح الفائدة في الـ Short باختصار، تذكر الشيخ والقناة، وتنتهي بدعوة لمتابعة المحاضرة الكاملة. لا روابط ولا تطويل ولا تكرار.",
-      "tags": ["تربية الأبناء", "الإمام الشافعي", "الشيخ سامي العربي"]
+      "tags": ["تربية الأبناء", "الإمام الشافعي", "فضيلة الشيخ أبو حفص الأثري"]
     }}
   ],
   "text_quotes": [
@@ -737,7 +770,7 @@ class GeminiGenerator:
 3. hashtags: حد أقصى {max_hashtags} هاشتاج بالعربي بدون علامة #. هذه القائمة تُستخدم كـ YouTube tags وأيضاً كـ #hashtags في الوصف.
    - كل عنصر لازم يكون عبارة عربية طبيعية بفراغات عادية بين الكلمات.
    - ممنوع منعاً باتاً استخدام underscore (_) أو شَرطة (-) لربط الكلمات.
-   - أمثلة صحيحة: "الإمام الشافعي"، "أدب الخلاف"، "طلب العلم"، "الشيخ سامي العربي".
+   - أمثلة صحيحة: "الإمام الشافعي"، "أدب الخلاف"، "طلب العلم"، "فضيلة الشيخ أبو حفص الأثري".
    - أمثلة خاطئة (لا تفعلها): "الإمام_الشافعي"، "أدب-الخلاف"، "طلب_العلم".
 {chapters_instr}
 7. important_clips: حد أقصى {max_clips} مقاطع موجّهة لـ YouTube Shorts (رأسي ≤60 ثانية).

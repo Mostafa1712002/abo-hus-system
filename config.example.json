@@ -12,6 +12,15 @@
     "channel_full_title": "القناة الرسمية لفضيلة الشيخ العلامة أبو حفص سامي بن العربي الأثري",
     "speaker_title": "فضيلة الشيخ أبو حفص سامي بن العربي الأثري",
     "speaker_short": "الشيخ أبو حفص",
+    "_speaker_honorifics_doc": "Pool of honorific forms for the speaker. The AI picks ONE per video based on topic to avoid the bare 'الشيخ' getting repeated. Add/remove freely. The first item is the safest fallback.",
+    "speaker_honorifics": [
+      "فضيلة الشيخ المحدث أبو حفص الأثري",
+      "فضيلة الشيخ العلامة أبو حفص بن العربي",
+      "الشيخ المحدث الأثري سامي بن العربي",
+      "فضيلة الشيخ سامي العربي الأثري",
+      "الشيخ العلامة المحدث أبو حفص الأثري",
+      "فضيلة الشيخ الفقيه أبو حفص بن العربي الأثري"
+    ],
     "content_type": "religious",
     "language_style": "فصيح موقر",
     "subscribe_call": "اشترك في قناة الشيخ سامي العربي وفعّل الجرس ليصلك كل جديد"
