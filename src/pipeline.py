@@ -972,16 +972,21 @@ def upload_phase1(video_path: Path, cfg: Config,
         f"الفيديو الأصلي: {video_path.name}\n\n"
         f"[سيتم تحديث العنوان والوصف تلقائياً بعد جاهزية الترجمة من YouTube]"
     )
+    # We compute the intended publish time but DON'T pass it to YouTube on
+    # initial upload. Reason: if Gemini quota is exhausted, processing fails
+    # and the video stays as "[قيد المعالجة]" placeholder. We don't want
+    # YouTube to auto-publish a placeholder. Instead we schedule publishAt
+    # in `_process_one` only AFTER all metadata is ready.
     if publish_at is None and yt_cfg.get("schedule_publish", True):
         publish_at = get_next_publish_time(cfg)
-    privacy = "private" if publish_at else yt_cfg.get("default_privacy", "private")
+    intended_publish_at = publish_at
 
     video_id = upload_video(
         youtube=youtube, video_path=video_path,
         title=placeholder_title, description=placeholder_desc,
         tags=yt_cfg.get("default_tags", []),
         category_id=yt_cfg.get("default_category_id", "27"),
-        privacy_status=privacy, publish_at=publish_at,
+        privacy_status="private", publish_at=None,
         made_for_kids=yt_cfg.get("made_for_kids", False),
         default_language="ar",
     )
@@ -1009,15 +1014,15 @@ def upload_phase1(video_path: Path, cfg: Config,
         video_id=video_id, original_path=str(video_path),
         original_name=video_path.name, series=series,
         uploaded_at=now_iso(), status="uploaded",
-        publish_at=publish_at.isoformat() if publish_at else "",
+        publish_at=intended_publish_at.isoformat() if intended_publish_at else "",
         playlist_id=playlist_id,
     ))
-    logger.info(f"✓ تم رفع: https://youtu.be/{video_id} (مستني captions)")
+    logger.info(f"✓ تم رفع: https://youtu.be/{video_id} (مستني captions, موعد النشر المقترح: {intended_publish_at})")
     return {
         "video_id": video_id,
         "url": f"https://youtu.be/{video_id}",
         "status": "pending_captions",
-        "publish_at": publish_at.isoformat() if publish_at else None,
+        "publish_at": intended_publish_at.isoformat() if intended_publish_at else None,
         "playlist_id": playlist_id,
     }
 
@@ -1048,9 +1053,33 @@ def process_pending(cfg: Config, video_id: Optional[str] = None) -> dict:
             _process_one(cfg, youtube, tracker, item, srt_text)
             processed += 1
         except Exception as e:
-            logger.error(f"فشل {item.video_id}: {e}", exc_info=True)
-            tracker.update(item.video_id, status="failed", error=str(e)[:500])
-            failed += 1
+            err_str = str(e)
+            err_low = err_str.lower()
+            is_quota = (
+                "rate limit: 429" in err_str
+                or "quotaexceeded" in err_low
+                or "exceeded your current quota" in err_low
+                or "كل المفاتيح" in err_str
+                or "resource_exhausted" in err_low
+            )
+            if is_quota:
+                # Quota errors are transient — keep status='uploaded' so the
+                # next 15-min cron will retry once Gemini quota resets.
+                # Don't publish a [قيد المعالجة] video.
+                logger.warning(
+                    f"quota exhausted for {item.video_id}, will retry next run: "
+                    f"{err_str[:200]}"
+                )
+                tracker.update(
+                    item.video_id,
+                    status="uploaded",
+                    error=f"[quota retry] {err_str[:300]}",
+                )
+                not_ready += 1
+            else:
+                logger.error(f"فشل {item.video_id}: {e}", exc_info=True)
+                tracker.update(item.video_id, status="failed", error=err_str[:500])
+                failed += 1
     return {"processed": processed, "ready": processed,
             "not_ready": not_ready, "failed": failed}
 
@@ -1377,8 +1406,56 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
         metadata_summary["tg_short_message_ids"] = tg_short_message_ids
     if tg_quote_message_ids:
         metadata_summary["tg_quote_message_ids"] = tg_quote_message_ids
+
+    # ===== Schedule the publishAt now that all metadata is ready =====
+    # On initial upload we deliberately did NOT set publishAt on YouTube
+    # (so a stuck/failed video never auto-publishes as "[قيد المعالجة]").
+    # Now that title+desc+chapters+shorts+FB+TG all succeeded, set the
+    # YouTube publishAt to the intended slot. If the intended slot has
+    # already passed (e.g. processing was delayed by a Gemini quota
+    # outage), push it forward by 24h until it's safely in the future.
+    final_publish_at_iso = item.publish_at
+    if item.publish_at:
+        try:
+            tz = ZoneInfo(cfg.youtube.get("timezone", "Africa/Cairo"))
+            pub = dt.datetime.fromisoformat(item.publish_at)
+            if pub.tzinfo is None:
+                pub = pub.replace(tzinfo=tz)
+            now = dt.datetime.now(tz)
+            min_target = now + dt.timedelta(minutes=10)
+            shifted = False
+            while pub < min_target:
+                pub += dt.timedelta(days=1)
+                shifted = True
+            youtube.videos().update(
+                part="status",
+                body={
+                    "id": item.video_id,
+                    "status": {
+                        "privacyStatus": "private",
+                        "publishAt": pub.astimezone(dt.timezone.utc).strftime(
+                            "%Y-%m-%dT%H:%M:%S.000Z"
+                        ),
+                        "selfDeclaredMadeForKids": cfg.youtube.get(
+                            "made_for_kids", False
+                        ),
+                    },
+                },
+            ).execute()
+            final_publish_at_iso = pub.isoformat()
+            if shifted:
+                logger.info(
+                    f"✓ مجدول للنشر: {pub.isoformat()} (تم تأجيله لأن الموعد الأصلي فات)"
+                )
+            else:
+                logger.info(f"✓ مجدول للنشر: {pub.isoformat()}")
+        except Exception as e:
+            # Don't fail the whole processing — admin can publish manually.
+            logger.error(f"فشل جدولة publishAt: {e}", exc_info=True)
+
     tracker.update(item.video_id, status="completed",
                    completed_at=now_iso(), title_updated=md.title,
+                   publish_at=final_publish_at_iso or "",
                    metadata=metadata_summary)
 
     # ===== Re-sort the series playlist =====
