@@ -48,6 +48,112 @@ def load_meta_credentials(
         return json.load(f)
 
 
+# Single-request POST starts failing with 413 above ~100MB. Above this size
+# we use the resumable upload protocol (start/transfer/finish phases).
+FB_DIRECT_UPLOAD_LIMIT = 95 * 1024 * 1024  # 95 MB safety threshold
+
+
+def _upload_video_resumable(
+    page_id: str,
+    page_access_token: str,
+    video_path: Path,
+    title: str,
+    description: str,
+    published: bool,
+    scheduled_publish_time: Optional[int],
+) -> str:
+    """Resumable upload for large Page videos (>~100MB).
+
+    Three-phase protocol: start → transfer (chunks) → finish.
+    Returns FB video_id on success.
+    """
+    file_size = video_path.stat().st_size
+    url = f"{GRAPH_VIDEO_BASE}/{page_id}/videos"
+    logger.info(
+        f"FB resumable start: {video_path.name} ({file_size / (1024*1024):.1f} MB)"
+    )
+
+    # Phase 1: start — FB returns the first chunk's offsets
+    r = requests.post(
+        url,
+        data={
+            "access_token": page_access_token,
+            "upload_phase": "start",
+            "file_size": str(file_size),
+        },
+        timeout=120,
+    )
+    if r.status_code != 200:
+        logger.error(f"FB resumable start فشل: {r.status_code} - {r.text[:500]}")
+        r.raise_for_status()
+    body = r.json()
+    upload_session_id = body["upload_session_id"]
+    fb_video_id = body["video_id"]
+    start_offset = int(body["start_offset"])
+    end_offset = int(body["end_offset"])
+
+    # Phase 2: transfer chunks until FB returns start==end (or we've sent all bytes)
+    with video_path.open("rb") as fh:
+        chunk_num = 0
+        while start_offset < file_size:
+            chunk_size = end_offset - start_offset
+            if chunk_size <= 0:
+                break
+            fh.seek(start_offset)
+            chunk = fh.read(chunk_size)
+            chunk_num += 1
+            pct = 100.0 * end_offset / file_size
+            logger.info(
+                f"FB chunk #{chunk_num}: {start_offset}-{end_offset} "
+                f"({chunk_size/(1024*1024):.1f} MB) [{pct:.0f}%]"
+            )
+            r = requests.post(
+                url,
+                data={
+                    "access_token": page_access_token,
+                    "upload_phase": "transfer",
+                    "upload_session_id": upload_session_id,
+                    "start_offset": str(start_offset),
+                },
+                files={
+                    "video_file_chunk": (
+                        video_path.name, chunk, "application/octet-stream",
+                    )
+                },
+                timeout=UPLOAD_TIMEOUT,
+            )
+            if r.status_code != 200:
+                logger.error(f"FB chunk #{chunk_num} فشل: {r.status_code} - {r.text[:500]}")
+                r.raise_for_status()
+            nb = r.json()
+            new_start = int(nb.get("start_offset", end_offset))
+            new_end = int(nb.get("end_offset", end_offset))
+            if new_start == new_end:
+                break  # FB says we're done
+            start_offset, end_offset = new_start, new_end
+
+    # Phase 3: finish — commit the upload with title/description
+    finish_data = {
+        "access_token": page_access_token,
+        "upload_phase": "finish",
+        "upload_session_id": upload_session_id,
+        "title": title,
+        "description": description,
+    }
+    if scheduled_publish_time is not None:
+        finish_data["published"] = "false"
+        finish_data["scheduled_publish_time"] = str(int(scheduled_publish_time))
+    else:
+        finish_data["published"] = "true" if published else "false"
+
+    r = requests.post(url, data=finish_data, timeout=120)
+    if r.status_code != 200:
+        logger.error(f"FB resumable finish فشل: {r.status_code} - {r.text[:500]}")
+        r.raise_for_status()
+    logger.info(f"تم رفع فيديو على FB Page (resumable): {fb_video_id}")
+    return fb_video_id
+
+
 def upload_video_to_page(
     page_id: str,
     page_access_token: str,
@@ -59,6 +165,9 @@ def upload_video_to_page(
 ) -> str:
     """
     يرفع فيديو طبيعي (16:9) لـ Facebook Page. بيرجع FB video_id.
+
+    للملفات الأكبر من ~95MB بنستخدم الـ resumable upload protocol تلقائياً
+    (start/transfer/finish) عشان نتجنب 413 Request Entity Too Large.
 
     Args:
         scheduled_publish_time: لو محدد (Unix timestamp بالثواني), هيتجدول وبتتعمل
@@ -72,6 +181,16 @@ def upload_video_to_page(
     title = (title or "").strip()[:255]
     description = (description or "").strip()[:FB_DESC_MAX]
 
+    file_size = video_path.stat().st_size
+
+    # Use resumable for large files
+    if file_size > FB_DIRECT_UPLOAD_LIMIT:
+        return _upload_video_resumable(
+            page_id=page_id, page_access_token=page_access_token,
+            video_path=video_path, title=title, description=description,
+            published=published, scheduled_publish_time=scheduled_publish_time,
+        )
+
     url = f"{GRAPH_VIDEO_BASE}/{page_id}/videos"
     data = {
         "access_token": page_access_token,
@@ -84,7 +203,6 @@ def upload_video_to_page(
     else:
         data["published"] = "true" if published else "false"
 
-    file_size = video_path.stat().st_size
     logger.info(
         f"بدء رفع فيديو على FB Page: {video_path.name} ({file_size / (1024 * 1024):.1f} MB)"
     )

@@ -136,7 +136,9 @@
     "delay_between_posts_seconds": 3,
     "credentials_file": "credentials/telegram_credentials.json",
     "send_text_fallback_for_large_videos": true,
-    "max_video_size_mb": 50
+    "max_video_size_mb": 50,
+    "_admin_chat_id_doc": "Optional. Set to your private chat_id with the bot to receive alerts on pipeline failures. To find it: start a private chat with the bot, then visit https://api.telegram.org/bot<TOKEN>/getUpdates and copy 'message.chat.id'.",
+    "admin_chat_id": ""
   },
 
   "persistence": {

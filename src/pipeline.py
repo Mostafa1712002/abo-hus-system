@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 import google.generativeai as genai
 
 from .ai_generator import GeminiGenerator, metadata_to_dict, TelegramQuote, VideoMetadata
+from .alerts import send_alert
 from .cold_storage import ColdStorage
 from .config import Config
 from .facebook_uploader import (
@@ -1076,10 +1077,32 @@ def process_pending(cfg: Config, video_id: Optional[str] = None) -> dict:
                     error=f"[quota retry] {err_str[:300]}",
                 )
                 not_ready += 1
+                # First-time quota alert — only when the retry counter is low,
+                # so we don't spam every 15 min.
+                if (item.captions_checked_count or 0) <= 1:
+                    send_alert(
+                        cfg,
+                        title="Gemini quota خلصت — الفيديو هـ يـ retry",
+                        video_id=item.video_id, series=item.series,
+                        video_name=item.original_name, error=err_str,
+                        extra=(
+                            "الـ pipeline هتعيد المحاولة كل 15 دقيقة لحد ما الـ "
+                            "quota يرجع (عادة في الفجر بتوقيت جوجل). الفيديو "
+                            "هيفضل private لحد ما يتعالج بنجاح."
+                        ),
+                        severity="warning",
+                    )
             else:
                 logger.error(f"فشل {item.video_id}: {e}", exc_info=True)
                 tracker.update(item.video_id, status="failed", error=err_str[:500])
                 failed += 1
+                send_alert(
+                    cfg,
+                    title="فشل في معالجة الفيديو — يحتاج تدخل يدوي",
+                    video_id=item.video_id, series=item.series,
+                    video_name=item.original_name, error=err_str,
+                    severity="error",
+                )
     return {"processed": processed, "ready": processed,
             "not_ready": not_ready, "failed": failed}
 
