@@ -68,9 +68,9 @@ class VideoMetadata:
     def description_with_chapters(self, base_description: str = "") -> str:
         body = base_description or self.description
         if not self.chapters:
-            return body + ("\n\n" + " ".join(f"#{h}" for h in self.hashtags) if self.hashtags else "")
+            return body + ("\n\n" + " ".join(f"#{h.replace(chr(32), chr(95))}" for h in self.hashtags) if self.hashtags else "")
         chapters_text = "\n".join(f"{c.timestamp} {c.title}" for c in self.chapters)
-        tags_text = " ".join(f"#{h}" for h in self.hashtags) if self.hashtags else ""
+        tags_text = " ".join(f"#{h.replace(chr(32), chr(95))}" for h in self.hashtags) if self.hashtags else ""
         return f"{body}\n\nالفصول:\n{chapters_text}\n\n{tags_text}".strip()
 
 
@@ -90,6 +90,10 @@ class GeminiGenerator:
     def _configure_current(self):
         genai.configure(api_key=self.api_keys[self._key_idx])
         self.model = genai.GenerativeModel(self.model_name)
+        # Claude replaces Gemini when enabled in config.json ("claude" block).
+        from src.claude_model import ClaudeModel, claude_enabled
+        if claude_enabled():
+            self.model = ClaudeModel()
 
     def _rotate_key(self):
         """انتقل للمفتاح التالي عند rate limit"""
@@ -205,6 +209,39 @@ class GeminiGenerator:
         # Pass extra candidates to give OpenAI verifier room to filter
         gemini_max = max_clips * 2 if openai_api_key else max_clips
         md = self._parse_response(data, video_duration_seconds, max_clip_seconds, min_clip_seconds, gemini_max)
+        # ===== Anti-truncation self-heal =====
+        # The single mega-call can truncate at 8192 tokens; json-repair then
+        # drops the (late) hashtags field, leaving the video with only default
+        # tags and no #hashtags. When hashtags come back empty, recover via the
+        # split path (small per-field calls that cannot truncate).
+        if not md.hashtags:
+            try:
+                logger.warning("hashtags فاضية بعد الـ mega-call (غالباً truncation) — استرجاع عبر generate_split")
+                split_md = self.generate_split(
+                    self._ask_via_api,
+                    srt_text_with_timestamps=srt_text_with_timestamps,
+                    plain_text=plain_text,
+                    video_duration_seconds=video_duration_seconds,
+                    max_clips=max_clips, min_clip_seconds=min_clip_seconds,
+                    max_clip_seconds=max_clip_seconds, max_title_length=max_title_length,
+                    max_hashtags=max_hashtags, include_chapters=include_chapters,
+                    content_context=content_context,
+                    description_template_hint=description_template_hint,
+                    shorts_selection_hint=shorts_selection_hint,
+                    speaker_honorifics=self._speaker_honorifics,
+                )
+                if split_md.hashtags:
+                    md.hashtags = split_md.hashtags
+                if not md.chapters and split_md.chapters:
+                    md.chapters = split_md.chapters
+                if not md.important_clips and split_md.important_clips:
+                    md.important_clips = split_md.important_clips
+                if not md.text_quotes and split_md.text_quotes:
+                    md.text_quotes = split_md.text_quotes
+                if not (md.description or "").strip() and split_md.description:
+                    md.description = split_md.description
+            except Exception as e:
+                logger.warning("hashtags recovery via split فشل: %s", str(e)[:160])
 
         # ===== Hallucination check =====
         # Gemini sometimes returns timestamps that don't exist in the SRT we
@@ -650,6 +687,454 @@ class GeminiGenerator:
             kept_blocks.append(b)
         return "\n\n".join(kept_blocks)
 
+    # =====================================================================
+    # SPLIT GENERATION (anti-truncation for long lectures)
+    # ---------------------------------------------------------------------
+    # gemini-2.5-flash caps output at 8192 tokens. For 60-90 min lectures the
+    # single "give me EVERYTHING" JSON (title+description+chapters+3 shorts+
+    # 3-5 quotes) overflows that cap and gets truncated; json-repair then
+    # silently drops the late fields (shorts/quotes). To avoid that we split
+    # generation into three SMALL requests, each asking for only its slice,
+    # and assemble the results into the SAME VideoMetadata the pipeline expects.
+    #
+    # Both transports reuse the SAME splitting logic: generate_split() takes an
+    # ``ask(prompt) -> dict`` callable. The API path passes ``_ask_via_api``;
+    # the web path passes a thin wrapper around gemini_web.generate_json. Each
+    # sub-prompt is built once here, so there is no prompt duplication.
+    # =====================================================================
+
+    @staticmethod
+    def _json_from_text(text: str) -> dict:
+        """Parse a (possibly messy / fenced / partly-truncated) JSON object out
+        of a model response. Mirrors the recovery ladder used by generate():
+        direct json.loads → first {...} match → json_repair. Returns {} only
+        when nothing usable can be salvaged."""
+        text = text or ""
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        extracted = match.group(0) if match else text
+        try:
+            return json.loads(extracted)
+        except json.JSONDecodeError:
+            pass
+        try:
+            from json_repair import repair_json
+            repaired = repair_json(extracted, return_objects=True)
+            if isinstance(repaired, dict):
+                return repaired
+        except Exception:
+            pass
+        return {}
+
+    def _ask_via_api(self, prompt: str) -> dict:
+        """Send one prompt to the Gemini API with key-rotation and JSON
+        recovery. Returns a dict ({} on unrecoverable output). This is the
+        per-sub-call transport used by generate_split() on the API path."""
+        last_error = None
+        response = None
+        for _ in range(len(self.api_keys)):
+            try:
+                response = self.model.generate_content(
+                    prompt,
+                    generation_config=genai.GenerationConfig(
+                        response_mime_type="application/json",
+                        temperature=0.7,
+                        max_output_tokens=8192,
+                    ),
+                )
+                break
+            except Exception as e:
+                last_error = e
+                err_str = str(e).lower()
+                rotate_triggers = (
+                    "quota", "rate", "429",
+                    "api_key_invalid", "api key not valid", "invalid_argument",
+                    "401", "403", "permission_denied", "unauthenticated",
+                    "expired",
+                )
+                if any(t in err_str for t in rotate_triggers) and len(self.api_keys) > 1:
+                    logger.warning(f"sub-call: key #{self._key_idx + 1} failed "
+                                   f"({type(e).__name__}), rotating...")
+                    self._rotate_key()
+                    continue
+                raise
+        if response is None:
+            raise RuntimeError(f"كل المفاتيح وصلت rate limit: {last_error}")
+        return self._json_from_text(response.text or "")
+
+    # ----- sub-prompt builders (each asks for ONLY its slice) -------------
+
+    def _honorifics_block(self, speaker_honorifics: Optional[List[str]]) -> str:
+        if not speaker_honorifics:
+            return ""
+        honor_list = "\n".join(f'   • "{h}"' for h in speaker_honorifics)
+        return (
+            "\nألقاب الشيخ المعتمدة (اختر **واحداً فقط** يناسب موضوع هذا الفيديو):\n"
+            f"{honor_list}\n"
+            "🚫 ممنوع منعاً باتاً كتابة كلمة \"الشيخ\" مجردة (بدون لقب أو إضافة بعدها) "
+            "في أي عنوان أو وصف أو اقتباس أو نص short.\n"
+            "✅ لازم تستخدم لقباً من القائمة أعلاه — ونوّع حسب موضوع الفيديو.\n"
+        )
+
+    def _safety_block(self) -> str:
+        return (
+            "تعليمات السلامة والحياد (إلزامية وفوق كل القواعد الأخرى):\n"
+            "- إذا كان موضوع المحاضرة (أو المقطع) سياسياً أو حسّاساً أو قد يثير فتنة أو طائفية "
+            "أو تحريضاً، أو يتعرّض لجهات أو أديان أو طوائف أو كنائس أو أحزاب أو دول أو أحداث جارية أو اتهامات أو مؤامرات: "
+            "فلا تذكر أي تفاصيل أو جهات أو اتهامات في العنوان أو الوصف أو الاقتباس إطلاقاً.\n"
+            "- في هذه الحالة اجعل العنوان والوصف محايدَين عامَّين بصياغة علمية شرعية مختصرة بلا تفسير ولا تفاصيل، "
+            "مثل: 'إقامة الحجة البيّنة'، 'بيان الحق بالدليل'، 'موعظة ووصية شرعية'، 'تذكير ونصيحة'، 'درس في العلم والعمل'.\n"
+            "- ممنوع منعاً باتاً أي عنوان/وصف/اقتباس ذي طابع سياسي أو تحريضي أو طائفي، أو يذكر جهة بعينها أو اتهاماً أو خطراً أو تنظيماً.\n"
+            "- الهدف: محتوى دعوي علمي موقّر لا يفتح باب فتنة ولا يعرّض القناة للحظر. عند الشك اختر الصيغة المحايدة المختصرة.\n"
+        )
+
+    def _build_core_prompt(
+        self, srt_with_ts: str, duration: float, max_title: int,
+        max_hashtags: int, include_chapters: bool,
+        content_context: str = "", description_template_hint: str = "",
+        speaker_honorifics: Optional[List[str]] = None,
+    ) -> str:
+        """Call 1: title + description + hashtags + chapters (the core)."""
+        # For chapters we want full-video coverage, so do NOT filter to middle.
+        srt = srt_with_ts
+        if len(srt) > 30000:
+            srt = srt[:30000] + "..."
+        context_block = f"\nسياق القناة والمحتوى:\n{content_context.strip()}\n" if content_context else ""
+        desc_hint_block = f"\nإرشاد لبنية الوصف: {description_template_hint.strip()}\n" if description_template_hint else ""
+        honorifics_block = self._honorifics_block(speaker_honorifics)
+        chapters_instr = (
+            "  \"chapters\": [ {\"timestamp\": \"00:00\", \"title\": \"المقدمة\"}, "
+            "{\"timestamp\": \"MM:SS\", \"title\": \"...\"} ]"
+            if include_chapters else "  \"chapters\": []"
+        )
+        chapters_rule = (
+            "- chapters: 3-7 فصول. أول فصل يبدأ من 00:00. لازم تكون مبنية على timestamps من النص."
+            if include_chapters else "- chapters: اتركها قائمة فارغة []."
+        )
+        return f"""أنت مساعد متخصص في تحسين فيديوهات يوتيوب العربية.
+هذه ترجمة فيديو مدته {duration:.0f} ثانية تقريباً. اقرأها وأنتج البيانات الأساسية فقط.
+{context_block}{desc_hint_block}{honorifics_block}
+---
+الترجمة مع التوقيتات:
+{srt}
+---
+
+{self._safety_block()}
+أنتج JSON بالشكل التالي بالظبط (لا تضف أي شرح خارج JSON):
+{{
+  "title": "عنوان جذاب وقصير بالعربي - أقل من {max_title} حرف، يثير الفضول، بدون كليك بيت مبتذل",
+  "description": "وصف بالعربي 3-5 فقرات يلخص الفيديو ويحفز المشاهد. ابدأ بهوك قوي. اذكر أهم النقاط بدون حرق المحتوى.",
+  "hashtags": ["الإمام الشافعي", "أدب الخلاف", "طلب العلم"],
+{chapters_instr}
+}}
+
+قواعد مهمة:
+- title: بالعربي الفصيح الموقر، أقل من {max_title} حرف، يجذب الانتباه بدون ابتذال.
+- description: مفصلة، فيها قيمة، تساعد SEO. أقل من 4500 حرف.
+- hashtags: حد أقصى {max_hashtags} هاشتاج بالعربي بدون علامة #. عبارات عربية طبيعية بفراغات.
+  ممنوع underscore (_) أو شَرطة (-). مثال صحيح: "الإمام الشافعي". مثال خاطئ: "الإمام_الشافعي".
+  - لو الفيديو فتوى أو حكم شرعي: ضمّن ضمن الهاشتاجات موضوع الفيديو + عبارة بحثية بصيغة السؤال زي «حكم كذا» أو «هل يجوز كذا» بحسب سؤال الفيديو الفعلي (بفراغات عادية، الكود بيحولها).
+{chapters_rule}
+- لا تخترع معلومات. اعتمد فقط على ما في الترجمة.
+- ارجع JSON صحيح فقط بدون markdown. (لا تُنتج important_clips أو text_quotes هنا — طلب منفصل.)
+"""
+
+    def _build_clips_prompt(
+        self, srt_with_ts: str, duration: float, max_clips: int,
+        min_clip: int, max_clip: int, shorts_selection_hint: str = "",
+        speaker_honorifics: Optional[List[str]] = None,
+    ) -> str:
+        """Call 2: important_clips (shorts segments) only."""
+        # Filter to the middle so the model never anchors on intro/outro.
+        srt = self._filter_srt_to_middle(srt_with_ts, duration)
+        if len(srt) > 30000:
+            srt = srt[:30000] + "..."
+        shorts_criteria = (shorts_selection_hint or self.DEFAULT_SHORTS_SELECTION_HINT).strip()
+        honorifics_block = self._honorifics_block(speaker_honorifics)
+        return f"""أنت متخصص في صناعة YouTube Shorts قوية من محاضرات عربية.
+هذه ترجمة فيديو مدته {duration:.0f} ثانية تقريباً (تم حذف المقدمة والخاتمة منها).
+مهمتك: اختيار {max_clips} مقاطع فقط تصلح لـ Shorts.
+{honorifics_block}
+---
+الترجمة مع التوقيتات:
+{srt}
+---
+
+أنتج JSON بالشكل التالي بالظبط (لا شيء غير important_clips):
+{{
+  "important_clips": [
+    {{
+      "start_seconds": رقم,
+      "end_seconds": رقم,
+      "reason": "ليه المقطع ده مهم وإيه نوع الهوك فيه",
+      "suggested_short_title": "عنوان على صيغة سؤال أو فجوة فضول (مثل: واجب أم سنة؟ / هل يجوز كذا؟ / متى يجب كذا؟ / سر كذا)",
+      "hook": "كلمتين أو ثلاثة قوية كـ caption على الـ thumbnail",
+      "description": "3-5 جمل عربية فصيحة تشرح الفائدة، تذكر الشيخ والقناة، وتنتهي بدعوة لمتابعة المحاضرة الكاملة. لا روابط ولا تكرار.",
+      "tags": ["تربية الأبناء", "الإمام الشافعي", "فضيلة الشيخ أبو حفص الأثري"]
+    }}
+  ]
+}}
+
+{self._safety_block()}
+قواعد important_clips:
+- اختر حتى {max_clips} مقاطع موجّهة لـ YouTube Shorts (رأسي ≤60 ثانية) — فقط المقاطع القوية اللي تنطبق عليها المعايير. لو مفيش إلا مقاطع قليلة قوية (مثلاً 2)، اكتفِ بيها ولا تُكمِل العدد بمقاطع ضعيفة أو عادية.
+- مدة كل مقطع بين {min_clip} و {max_clip} ثانية (الأمثل 30-50 ثانية).
+- يبدأ في نقطة طبيعية في الكلام (مش نص جملة).
+- معايير اختيار المقطع (التزم بها بحرفية):
+{shorts_criteria}
+- حقل "suggested_short_title" (مهم جداً): يفضّل صيغة السؤال أو الفضول («هل...؟»، «متى...؟»، «واجب أم سنة؟»، «سر...»، «حقيقة...»، «أيهما...؟») — دي الصيغ الأعلى مشاهدة فعلاً على القناة. أقل من 60 حرف، بدون مبالغة رخيصة.
+- حقل "hook": 2-3 كلمات قوية تختصر فكرة المقطع.
+- حقل "description" (إلزامي): 3-5 جمل عربية فصيحة، تنتهي بدعوة لمتابعة المحاضرة الكاملة. لا روابط (تُضاف برمجياً).
+- حقل "tags" (إلزامي): 8-12 وسماً عربياً طبيعياً بفراغات (ممنوع _ أو -)، فيها وسوم محتوى المقطع + نوعه +
+  وسوم العلامة "الشيخ سامي العربي"، "أبو حفص الأثري" + وسوم Shorts عامة.
+- لا تخترع معلومات. اعتمد فقط على ما في الترجمة.
+- ارجع JSON صحيح فقط بدون markdown. (لا تُنتج title أو description أو text_quotes هنا.)
+"""
+
+    def _build_quotes_prompt(
+        self, srt_with_ts: str, duration: float,
+        speaker_honorifics: Optional[List[str]] = None,
+    ) -> str:
+        """Call 3: text_quotes (3-5) only."""
+        srt = self._filter_srt_to_middle(srt_with_ts, duration)
+        if len(srt) > 30000:
+            srt = srt[:30000] + "..."
+        honorifics_block = self._honorifics_block(speaker_honorifics)
+        return f"""أنت متخصص في اقتناص المقولات البليغة من محاضرات إسلامية عربية للنشر على تليجرام.
+هذه ترجمة فيديو مدته {duration:.0f} ثانية تقريباً.
+{honorifics_block}
+---
+الترجمة مع التوقيتات:
+{srt}
+---
+
+أنتج JSON بالشكل التالي بالظبط (لا شيء غير text_quotes):
+{{
+  "text_quotes": [
+    {{
+      "text": "نص الاقتباس بالعربية الفصحى، جملة إلى ثلاث، مكتفٍ بذاته بدون اقتباسات مزدوجة محيطة.",
+      "context_hint": "سطر قصير للسياق إن لزم (اختياري، يمكن تركه فاضي)",
+      "source_timestamp": "MM:SS"
+    }}
+  ]
+}}
+
+{self._safety_block()}
+قواعد text_quotes:
+- اختر من 3 إلى 5 مقولات مكتوبة قصيرة (جملة إلى ثلاث) صالحة للنشر كمنشور نصي مستقل.
+- كل مقولة مكتفية بذاتها (لا تحتاج سياق سابق)، قابلة للاقتباس وبليغة، تنقل فائدة قاطعة أو حكماً شرعياً.
+- تجنّب المقولات المكسورة أو الناقصة أو التي تعتمد على إشارة لشيء سبق.
+- **تصحيح أخطاء auto-captions:** النص ناتج من YouTube auto-captions وقد يحتوي أخطاءً.
+  صحّح الإملاء والنحو وأضف الترقيم المناسب، واستبدل الكلمات المسموعة خطأً بالأقرب معنى. لا تنشر اقتباساً به أخطاء واضحة.
+- الصيغة: نص عربي فصيح صحيح، بدون اقتباسات مزدوجة محيطة، بدون markdown، بدون أقواس ASCII () أو [].
+- "context_hint" اختياري — اتركه "" إن لم يلزم. "source_timestamp" بصيغة MM:SS.
+- لا تخترع معلومات. ارجع JSON صحيح فقط بدون markdown. (لا تُنتج title/description/important_clips هنا.)
+"""
+
+    # ----- partial parsers (slice the shared _parse_response logic) -------
+
+    def _parse_core(self, data: dict) -> dict:
+        """Parse title/description/hashtags/chapters from a core-call dict."""
+        title = (data.get("title") or "").strip()
+        description = (data.get("description") or "").strip()
+        hashtags = [h.strip().lstrip("#") for h in (data.get("hashtags") or []) if str(h).strip()]
+        chapters: List[Chapter] = []
+        for ch in data.get("chapters", []) or []:
+            if not isinstance(ch, dict):
+                continue
+            ts = (ch.get("timestamp") or "").strip()
+            t = (ch.get("title") or "").strip()
+            if ts and t and re.match(r"^\d{1,2}:\d{2}(:\d{2})?$", ts):
+                chapters.append(Chapter(timestamp=ts, title=t))
+        return {"title": title, "description": description,
+                "hashtags": hashtags, "chapters": chapters}
+
+    def _parse_clips(
+        self, data: dict, video_duration: float,
+        max_clip_seconds: int, min_clip_seconds: int, max_clips: int,
+        title_fallback: str = "",
+    ) -> List[ImportantClip]:
+        """Parse important_clips with the SAME intro/outro filtering, duration
+        clamping and tag normalization used by _parse_response."""
+        clips: List[ImportantClip] = []
+        intro_cutoff = video_duration * 0.15
+        outro_cutoff = video_duration * 0.90
+        for c in data.get("important_clips", []) or []:
+            if not isinstance(c, dict):
+                continue
+            try:
+                s = float(c.get("start_seconds", 0))
+                e = float(c.get("end_seconds", 0))
+            except (TypeError, ValueError):
+                continue
+            if e <= s:
+                continue
+            if s < intro_cutoff:
+                logger.info("rejecting intro clip start=%.1fs (cutoff=%.1fs)", s, intro_cutoff)
+                continue
+            if s > outro_cutoff:
+                logger.info("rejecting outro clip start=%.1fs (cutoff=%.1fs)", s, outro_cutoff)
+                continue
+            duration_clip = e - s
+            if duration_clip > max_clip_seconds:
+                e = s + max_clip_seconds
+            if duration_clip < min_clip_seconds:
+                continue
+            if e > video_duration:
+                e = video_duration
+            hook_val = str(c.get("hook", "") or "").strip()[:60]
+            short_title_val = str(c.get("suggested_short_title", title_fallback))[:100]
+            description_val = str(c.get("description", "") or "").strip()[:1500]
+            raw_tags = c.get("tags", []) or []
+            tags_val: List[str] = []
+            seen_tags = set()
+            if isinstance(raw_tags, list):
+                for t in raw_tags:
+                    if not isinstance(t, (str, int, float)):
+                        continue
+                    t_clean = str(t).strip().lstrip("#")
+                    if not t_clean or t_clean.lower() in seen_tags:
+                        continue
+                    seen_tags.add(t_clean.lower())
+                    tags_val.append(t_clean)
+            clips.append(ImportantClip(
+                start_seconds=s, end_seconds=e,
+                reason=str(c.get("reason", ""))[:300],
+                suggested_short_title=short_title_val,
+                hook=hook_val or " ".join(short_title_val.split()[:3]),
+                description=description_val, tags=tags_val,
+            ))
+        return clips[:max_clips]
+
+    def _parse_quotes(self, data: dict) -> List[TelegramQuote]:
+        """Parse text_quotes with the SAME normalization used by _parse_response."""
+        quotes: List[TelegramQuote] = []
+        for q in data.get("text_quotes", []) or []:
+            if not isinstance(q, dict):
+                continue
+            text = str(q.get("text", "") or "").strip()
+            if len(text) >= 2 and text[0] in '"“«' and text[-1] in '"”»':
+                text = text[1:-1].strip()
+            if not text:
+                continue
+            if len(text) > 800:
+                text = text[:800].rstrip() + "..."
+            ctx = str(q.get("context_hint", "") or "").strip()[:200]
+            ts = str(q.get("source_timestamp", "") or "").strip()
+            if ts and not re.match(r"^\d{1,2}:\d{2}(:\d{2})?$", ts):
+                ts = ""
+            quotes.append(TelegramQuote(text=text, context_hint=ctx, source_timestamp=ts))
+        return quotes[:5]
+
+    def generate_split(
+        self,
+        ask,
+        srt_text_with_timestamps: str,
+        plain_text: str,
+        video_duration_seconds: float,
+        max_clips: int = 3,
+        min_clip_seconds: int = 25,
+        max_clip_seconds: int = 58,
+        max_title_length: int = 70,
+        max_hashtags: int = 8,
+        include_chapters: bool = True,
+        content_context: str = "",
+        description_template_hint: str = "",
+        shorts_selection_hint: str = "",
+        speaker_honorifics: Optional[List[str]] = None,
+    ) -> VideoMetadata:
+        """Generate metadata in THREE small requests to avoid 8192-token
+        truncation on long lectures, then assemble a single VideoMetadata.
+
+        ``ask`` is a callable ``ask(prompt: str) -> dict`` that sends one prompt
+        and returns the parsed JSON dict. Pass ``self._ask_via_api`` for the API
+        path or a wrapper around ``gemini_web.generate_json`` for the web path —
+        the splitting/assembly logic below is identical for both.
+
+        Partial-tolerant: if a sub-call raises or returns empty, that slice is
+        left empty and the others still populate the result (a main video with
+        some shorts/quotes is better than nothing). Raises only if the CORE call
+        yields no title (we can't upload a titleless video).
+        """
+        honorifics = list(speaker_honorifics or [])
+        self._speaker_honorifics = honorifics
+
+        # ----- Call 1: core (title/description/hashtags/chapters) ----------
+        core = {"title": "", "description": "", "hashtags": [], "chapters": []}
+        try:
+            core_prompt = self._build_core_prompt(
+                srt_text_with_timestamps, video_duration_seconds,
+                max_title_length, max_hashtags, include_chapters,
+                content_context, description_template_hint,
+                speaker_honorifics=honorifics,
+            )
+            core = self._parse_core(ask(core_prompt) or {})
+        except Exception as e:
+            logger.warning("split core call failed: %s", str(e)[:160])
+
+        if not (core.get("title") or "").strip():
+            raise ValueError("generate_split: core call رجع عنوان فاضي")
+
+        # ----- Call 2: important_clips -------------------------------------
+        # The model occasionally anchors on intro lines and emits tiny
+        # (hallucinated) start_seconds that all get rejected, leaving zero
+        # clips. Since the sub-prompt is small (no truncation risk), we retry
+        # up to `clips_tries` times and keep the best (most clips) result.
+        clips: List[ImportantClip] = []
+        clips_prompt = self._build_clips_prompt(
+            srt_text_with_timestamps, video_duration_seconds,
+            max_clips, min_clip_seconds, max_clip_seconds,
+            shorts_selection_hint, speaker_honorifics=honorifics,
+        )
+        clips_tries = 3
+        for attempt in range(1, clips_tries + 1):
+            try:
+                cand = self._parse_clips(
+                    ask(clips_prompt) or {}, video_duration_seconds,
+                    max_clip_seconds, min_clip_seconds, max_clips,
+                    title_fallback=core["title"],
+                )
+                # Reuse the existing hallucination guard (start_seconds must map
+                # to a real SRT line within ±5s).
+                try:
+                    cand = self._reject_hallucinated_clips(cand, srt_text_with_timestamps)
+                except Exception as he:
+                    logger.warning("split clips hallucination check skipped: %s", he)
+            except Exception as e:
+                logger.warning("split clips attempt %d/%d failed: %s",
+                               attempt, clips_tries, str(e)[:160])
+                cand = []
+            if len(cand) > len(clips):
+                clips = cand
+            if len(clips) >= max_clips:
+                break
+            if attempt < clips_tries:
+                logger.info("split clips attempt %d/%d kept %d/%d clips — retrying",
+                            attempt, clips_tries, len(clips), max_clips)
+
+        # ----- Call 3: text_quotes -----------------------------------------
+        quotes: List[TelegramQuote] = []
+        try:
+            quotes_prompt = self._build_quotes_prompt(
+                srt_text_with_timestamps, video_duration_seconds,
+                speaker_honorifics=honorifics,
+            )
+            quotes = self._parse_quotes(ask(quotes_prompt) or {})
+        except Exception as e:
+            logger.warning("split quotes call failed (quotes empty): %s", str(e)[:160])
+
+        return VideoMetadata(
+            title=core["title"],
+            description=core["description"],
+            chapters=core["chapters"],
+            hashtags=core["hashtags"],
+            important_clips=clips,
+            text_quotes=quotes,
+        )
+
     def _build_prompt(
         self,
         srt_with_ts: str,
@@ -749,7 +1234,7 @@ class GeminiGenerator:
       "start_seconds": رقم,
       "end_seconds": رقم,
       "reason": "ليه المقطع ده مهم وإيه نوع الهوك فيه",
-      "suggested_short_title": "عنوان جذاب لـ Short",
+      "suggested_short_title": "عنوان على صيغة سؤال أو فجوة فضول (مثل: واجب أم سنة؟ / هل يجوز كذا؟ / متى يجب كذا؟ / سر كذا)",
       "hook": "كلمتين أو ثلاثة قوية تصلح كـ caption على الـ thumbnail",
       "description": "3-5 جمل عربية فصيحة تشرح الفائدة في الـ Short باختصار، تذكر الشيخ والقناة، وتنتهي بدعوة لمتابعة المحاضرة الكاملة. لا روابط ولا تطويل ولا تكرار.",
       "tags": ["تربية الأبناء", "الإمام الشافعي", "فضيلة الشيخ أبو حفص الأثري"]
@@ -772,6 +1257,7 @@ class GeminiGenerator:
    - ممنوع منعاً باتاً استخدام underscore (_) أو شَرطة (-) لربط الكلمات.
    - أمثلة صحيحة: "الإمام الشافعي"، "أدب الخلاف"، "طلب العلم"، "فضيلة الشيخ أبو حفص الأثري".
    - أمثلة خاطئة (لا تفعلها): "الإمام_الشافعي"، "أدب-الخلاف"، "طلب_العلم".
+   - لو الفيديو فتوى/حكم: ضمّن موضوع الفيديو + عبارة سؤالية بحثية زي «حكم كذا» / «هل يجوز كذا» بحسب السؤال الفعلي (بفراغات، الكود يحوّلها لهاشتاج).
 {chapters_instr}
 7. important_clips: حد أقصى {max_clips} مقاطع موجّهة لـ YouTube Shorts (رأسي ≤60 ثانية).
    - مدة كل مقطع لازم تكون بين {min_clip} و {max_clip} ثانية (الأمثل 30-50 ثانية).
