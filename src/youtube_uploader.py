@@ -190,7 +190,7 @@ def upload_short(
     hashtag_pool: List[str] = []
     seen_h = set()
     for t in tags or []:
-        t_clean = (t or "").strip().lstrip("#").replace(" ", "")
+        t_clean = (t or "").strip().lstrip("#").replace(" ", "_")
         if not t_clean:
             continue
         key = t_clean.lower()
@@ -548,7 +548,7 @@ def get_or_create_playlist(youtube, title: str, description: str = "") -> Option
                 "defaultLanguage": "ar",
             },
             "status": {
-                "privacyStatus": "unlisted",
+                "privacyStatus": "public",
             },
         }
         response = youtube.playlists().insert(
