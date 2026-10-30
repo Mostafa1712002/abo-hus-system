@@ -68,3 +68,14 @@ for the next 3 episodes per lane series and writes the result into the worker ca
 SRT on the site and synthetic `L-` ids (not on YouTube, still main video only).
 
 First end-to-end lane run: 2026-10-30 المدخل 40 → https://youtu.be/jBsv6QTzj7E (no SRT yet, raw title).
+
+## Compression before upload + damaged audio, 2026-10-30
+- **Compression.** The home uplink is slow (~0.3 MB/s), so every file is now re-encoded on the PC before zipping (`pc/compress.py`: x264 CRF 27 veryfast, AAC 64k mono, `+faststart`). For these 320x240 lectures that's 65–80% smaller with no visible loss, at 100–200x realtime.
+  - **Check.** An encode only counts if the output video **and audio** both cover at least 97% of the source duration; otherwise the original file ships.
+  - **Archive repointing.** Archive files change extension (`.avi`/`.rmvb` → `.mp4`). Once the zip is on cold storage, `pc/zip_and_upload.py` sends the renames to `scripts/local_rename_members.py`, which repoints `mp4_path`.
+  - **Source batching.** Source episodes ship in batches of 10 per series, `"<folder> - التأصيل <k>.zip"`, round-robin in lane-need order (الترمذي, الرقاق, القدر, المدخل 61+, الاعتقاد, المتجر).
+- **Damaged audio.** `pc/audio_scan.py` found 35 archive AVIs whose MP3 track is corrupt: decoded start to finish, it covers only part of the lecture (or garbage). Seeking still plays in spots, so a player may hide it, but any ffmpeg re-encode (including `intro_prepend` on the VPS) produces broken audio. The list is in `pc/broken_audio.txt`; those files are not uploaded.
+  - **17 with a source-channel copy:** moved to `download_status='source'`, so they get re-downloaded via `pc/source_pipeline.py`.
+  - **18 with no copy anywhere (`L-` ids):** set to `download_status='broken'`. `local_feed.py` holds the lane at a broken row so episode order is kept until a good file is supplied or the row is skipped by hand.
+  - **DB backup:** `abuhafs.db.bak.brokenaudio.*`.
+- **2026-10-30, user decision:** the 18 'broken' rows were skipped (`download_status='skipped'`, `process_status='skipped'`; DB backup `abuhafs.db.bak.skipbroken.*`). The lanes go straight past them. Skipped: الاعتقاد 11, 19–21 · المدخل 68 · الترمذي 66–70, 73, 78, 79 · فضائل الصحابة 1–3, 5 · الرقاق 35.

@@ -38,10 +38,15 @@ def main():
             print(slug)
             return
         row = con.execute(
-            "SELECT * FROM catalog_videos WHERE series_slug=? AND download_status IN ('local','source') "
+            "SELECT * FROM catalog_videos WHERE series_slug=? AND download_status IN ('local','source','broken') "
             "AND process_status='pending' ORDER BY ord, id LIMIT 1", (slug,)).fetchone()
         if not row:
             continue
+        if row["download_status"] == "broken":
+            # local file with a damaged audio track and no copy anywhere else —
+            # hold the lane here (keeps episode order) until someone supplies a fix
+            log(f"feed {slug} ord={row['ord']}: waiting — {row['download_error']}")
+            return
         dest_dir = WORKSPACE / slug
         dest_dir.mkdir(parents=True, exist_ok=True)
         if row["download_status"] == "source":
