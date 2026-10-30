@@ -742,7 +742,10 @@ def _publish_short_to_ig_reel(cfg: Config, short_path: Path,
         logger.info(f"✓ Instagram Reel: {media_id}")
         return media_id
     except Exception as e:
-        logger.warning(f"فشل رفع IG Reel ({short_path.name}): {e}")
+        # Graph API errors echo back the request URL, which carries the page
+        # access token - never let that reach a log file.
+        _safe = re.sub(r"access_token=[^&\s]+", "access_token=<redacted>", str(e))
+        logger.warning(f"فشل رفع IG Reel ({short_path.name}): {_safe}")
         return None
 
 
@@ -1360,6 +1363,8 @@ def _process_one(cfg, youtube, tracker, item, srt_text):
                 aspect=cfg.shorts.get("output_aspect", "9:16"),
                 burn_subtitles=cfg.shorts.get("burn_subtitles", True),
                 subtitle_font_size=cfg.shorts.get("subtitle_font_size", 48),
+                word_level_captions=cfg.shorts.get("word_level_captions", False),
+                caption_font_name=cfg.shorts.get("caption_font_name", "Noto Sans Arabic"),
             )
             logger.info(f"✓ تم قص {len(cut_paths)} short")
         except Exception as e:

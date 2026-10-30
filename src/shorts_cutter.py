@@ -37,6 +37,8 @@ def cut_clip(
     burn_subtitles: bool = False,
     srt_path: Optional[str | Path] = None,
     subtitle_font_size: int = 48,
+    word_level_captions: bool = False,
+    caption_font_name: str = "Noto Sans Arabic",
 ) -> Path:
     """
     يقص مقطع من الفيديو ويحوله لـ aspect ratio معين.
@@ -51,6 +53,10 @@ def cut_clip(
     # video filter
     if aspect == "9:16":
         # Strategy: نعمل blurred background بنفس الفيديو، ونحط الفيديو الأصلي في النص
+        # Blurred-pad, NOT centre crop. This channel's source is mostly static title
+        # cards and book covers, so cropping to 9:16 slices the text off both sides
+        # (verified on frames from 85tL9JbkXYw). Fit the whole 16:9 frame over a
+        # blurred copy of itself so nothing is ever cut.
         vf = (
             "split=2[bg][fg];"
             "[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
@@ -65,9 +71,22 @@ def cut_clip(
 
     # subtitles burn-in
     if burn_subtitles and srt_path:
-        srt_filter = _build_subtitle_filter(srt_path, subtitle_font_size, start_seconds, end_seconds)
-        if srt_filter:
-            vf = f"{vf},{srt_filter}"
+        sub_filter = None
+        if word_level_captions:
+            # Forced alignment on the known catalog text gives a true onset per word, so
+            # captions can change on the word instead of sitting in 3-5 s SRT blocks.
+            from .word_captions import build_word_caption_filter
+            sub_filter = build_word_caption_filter(
+                media=Path(video_path), srt_path=Path(srt_path),
+                clip_start=start_seconds, clip_end=end_seconds,
+                out_dir=output_path.parent,
+                font_name=caption_font_name, font_size=subtitle_font_size,
+            )
+        if sub_filter is None:   # aligner unavailable or failed -> plain SRT blocks
+            sub_filter = _build_subtitle_filter(srt_path, subtitle_font_size,
+                                                start_seconds, end_seconds)
+        if sub_filter:
+            vf = f"{vf},{sub_filter}"
 
     cmd = [
         "ffmpeg", "-y",
@@ -179,6 +198,8 @@ def cut_all_shorts(
     aspect: str = "9:16",
     burn_subtitles: bool = True,
     subtitle_font_size: int = 48,
+    word_level_captions: bool = False,
+    caption_font_name: str = "Noto Sans Arabic",
 ) -> List[Path]:
     """يقص كل الـ shorts من قائمة الـ clips ويرجع المسارات"""
     output_dir = Path(output_dir)
@@ -197,6 +218,8 @@ def cut_all_shorts(
                 burn_subtitles=burn_subtitles,
                 srt_path=srt_path,
                 subtitle_font_size=subtitle_font_size,
+                word_level_captions=word_level_captions,
+                caption_font_name=caption_font_name,
             )
             paths.append(out)
         except Exception as e:
