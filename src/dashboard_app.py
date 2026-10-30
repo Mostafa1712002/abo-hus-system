@@ -1446,3 +1446,375 @@ async def video_detail(
             "raw_json": raw_json,
         },
     )
+
+
+# ===========================================================================
+# Catalog (abuhafs.info re-upload) — download tracking
+# Appended by the channel re-upload initiative. Queries the catalog_videos
+# table (created by import_catalog.py) directly via the existing engine.
+# ===========================================================================
+from sqlalchemy import text as _sql_text  # noqa: E402
+
+
+def _catalog_series_rows():
+    """Per-series download/process aggregates from catalog_videos."""
+    if _engine is None:
+        return []
+    sql = _sql_text(
+        """
+        SELECT series, series_slug,
+               COUNT(*) AS total,
+               SUM(download_status='downloaded') AS downloaded,
+               SUM(download_status='downloading') AS downloading,
+               SUM(download_status='failed') AS failed,
+               SUM(download_status='skipped') AS skipped,
+               SUM(download_status='pending') AS pending,
+               SUM(process_status='done') AS processed,
+               COALESCE(SUM(download_bytes),0) AS bytes
+        FROM catalog_videos
+        GROUP BY series_slug
+        ORDER BY total DESC
+        """
+    )
+    out = []
+    with _engine.connect() as conn:
+        for r in conn.execute(sql).mappings():
+            d = dict(r)
+            d["gb"] = round((d.get("bytes") or 0) / (1024 ** 3), 2)
+            done = (d.get("downloaded") or 0) + (d.get("skipped") or 0)
+            d["pct"] = round(100 * done / d["total"], 1) if d["total"] else 0
+            out.append(d)
+    return out
+
+
+def _catalog_totals():
+    if _engine is None:
+        return {}
+    sql = _sql_text(
+        """SELECT download_status AS st, COUNT(*) AS n,
+                  COALESCE(SUM(download_bytes),0) AS bytes
+           FROM catalog_videos GROUP BY download_status"""
+    )
+    totals = {"pending": 0, "downloading": 0, "downloaded": 0, "failed": 0, "skipped": 0, "gb": 0.0, "total": 0}
+    with _engine.connect() as conn:
+        for r in conn.execute(sql).mappings():
+            totals[r["st"]] = r["n"]
+            totals["total"] += r["n"]
+            totals["gb"] += (r["bytes"] or 0) / (1024 ** 3)
+    totals["gb"] = round(totals["gb"], 2)
+    return totals
+
+
+@app.get("/api/catalog")
+async def api_catalog(user: User = Depends(current_user)):
+    return JSONResponse({"totals": _catalog_totals(), "series": _catalog_series_rows()})
+
+
+@app.get("/catalog", response_class=HTMLResponse)
+async def catalog_page(request: Request, user: User = Depends(current_user)):
+    return templates.TemplateResponse(
+        request,
+        "catalog.html",
+        {
+            "now": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "channel_name": "قناة الشيخ سامي العربي",
+            "totals": _catalog_totals(),
+            "series": _catalog_series_rows(),
+        },
+    )
+
+
+# === MEDIA-LIBRARY-BLOCK START (managed: replace whole region, do not split) ===
+# Media Library — upload / drive-fetch / rename / in-browser player.
+# Storage is /opt/abuhafs/media_library (OUTSIDE the pipeline's catalog_workspace).
+# Hardened: media-extension allowlist + hardcoded MIME + nosniff (no inline XSS).
+import re as _media_re
+import json as _media_json
+import secrets as _media_secrets
+import subprocess as _media_subprocess
+import mimetypes as _media_mimetypes  # kept for reference; NOT trusted for serving
+from fastapi import File as _MediaFile, UploadFile as _MediaUploadFile
+from fastapi.responses import StreamingResponse as _MediaStreamingResponse
+
+MEDIA_ROOT = PROJECT_ROOT.parent / "media_library"
+_MEDIA_JOBS_DIR = MEDIA_ROOT / ".jobs"
+_MEDIA_AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".aac", ".ogg", ".opus", ".flac"}
+_MEDIA_VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
+_MEDIA_EXTS = _MEDIA_AUDIO_EXTS | _MEDIA_VIDEO_EXTS
+# Hardcoded MIME map — we NEVER trust mimetypes.guess_type for serving, to avoid
+# serving an attacker-controlled file as text/html and getting stored XSS.
+_MEDIA_MIME = {
+    ".mp4": "video/mp4", ".mov": "video/quicktime", ".mkv": "video/x-matroska",
+    ".webm": "video/webm", ".m4v": "video/x-m4v", ".avi": "video/x-msvideo",
+    ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".wav": "audio/wav",
+    ".aac": "audio/aac", ".ogg": "audio/ogg", ".opus": "audio/ogg",
+    ".flac": "audio/flac",
+}
+
+
+def _media_safe_name(name: str, fallback_ext: str = "") -> str:
+    """Sanitize a user-supplied file name: no path separators, no traversal."""
+    name = (name or "").strip().replace("/", " ").replace("\\", " ").strip()
+    name = name.lstrip(".").strip()
+    if not name:
+        name = "ملف"
+    if not Path(name).suffix and fallback_ext:
+        name = name + fallback_ext
+    return name
+
+
+def _media_is_allowed(name: str) -> bool:
+    return Path(name).suffix.lower() in _MEDIA_EXTS
+
+
+def _media_resolve(rel):
+    """Resolve a relative path under MEDIA_ROOT, blocking traversal escapes."""
+    if rel is None:
+        return None
+    rel = rel.strip().lstrip("/")
+    base = MEDIA_ROOT.resolve()
+    cand = (base / rel).resolve()
+    try:
+        cand.relative_to(base)
+    except ValueError:
+        return None
+    return cand
+
+
+def _media_target_dir(folder: str):
+    folder = (folder or "").strip().strip("/")
+    if not folder:
+        return MEDIA_ROOT
+    segs = [s for s in _media_re.split(r"[\\/]+", folder) if s and s not in (".", "..")]
+    return _media_resolve("/".join(segs)) if segs else MEDIA_ROOT
+
+
+def _media_items() -> list:
+    base = MEDIA_ROOT
+    base.mkdir(parents=True, exist_ok=True)
+    items = []
+    for root, dirs, files in os.walk(base):
+        dirs[:] = [d for d in sorted(dirs) if d != ".jobs"]
+        for f in sorted(files):
+            ext = Path(f).suffix.lower()
+            if ext not in _MEDIA_EXTS:
+                continue
+            full = Path(root) / f
+            rel = str(full.relative_to(base))
+            try:
+                size = full.stat().st_size
+            except OSError:
+                size = 0
+            folder = str(Path(root).relative_to(base))
+            items.append({
+                "rel": rel,
+                "name": f,
+                "folder": "" if folder == "." else folder,
+                "size_mb": round(size / (1024 * 1024), 1),
+                "is_audio": ext in _MEDIA_AUDIO_EXTS,
+            })
+    return items
+
+
+def _media_extract_drive_id(url: str):
+    url = (url or "").strip()
+    m = _media_re.search(r"/d/([A-Za-z0-9_-]{20,})", url) or _media_re.search(
+        r"[?&]id=([A-Za-z0-9_-]{20,})", url
+    )
+    if m:
+        return m.group(1)
+    if _media_re.fullmatch(r"[A-Za-z0-9_-]{20,}", url):
+        return url
+    return None
+
+
+@app.get("/media", response_class=HTMLResponse)
+async def media_page(request: Request, user: User = Depends(current_user)):
+    return templates.TemplateResponse(
+        request,
+        "media.html",
+        {
+            "now": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "channel_name": "قناة الشيخ سامي العربي",
+            "items": _media_items(),
+            "user_name": user.name or user.email,
+        },
+    )
+
+
+@app.post("/media/upload", include_in_schema=False)
+async def media_upload(
+    request: Request,
+    file: _MediaUploadFile = _MediaFile(...),
+    folder: str = Form(""),
+    name: str = Form(""),
+    user: User = Depends(current_user),
+):
+    dest_dir = _media_target_dir(folder)
+    if dest_dir is None:
+        raise HTTPException(status_code=400, detail="bad folder")
+    fallback_ext = Path(file.filename or "").suffix
+    fname = _media_safe_name(name or (file.filename or "upload"), fallback_ext)
+    if not _media_is_allowed(fname):
+        raise HTTPException(status_code=400, detail="نوع ملف غير مسموح — فيديو/صوت فقط")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / fname
+    stem, suf = dest.stem, dest.suffix
+    i = 1
+    while dest.exists():
+        dest = dest_dir / f"{stem} ({i}){suf}"
+        i += 1
+    with open(dest, "wb") as out:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+    await file.close()
+    try:
+        logger.info("media upload: %s (%d bytes)", dest, dest.stat().st_size)
+    except OSError:
+        pass
+    return RedirectResponse("/media", status_code=303)
+
+
+@app.post("/media/drive", include_in_schema=False)
+async def media_drive(
+    request: Request,
+    url: str = Form(...),
+    folder: str = Form(""),
+    name: str = Form(""),
+    user: User = Depends(current_user),
+):
+    fid = _media_extract_drive_id(url)
+    if not fid:
+        raise HTTPException(status_code=400, detail="رابط Google Drive غير صالح")
+    target_dir = _media_target_dir(folder)
+    if target_dir is None:
+        raise HTTPException(status_code=400, detail="bad folder")
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    job = {
+        "id": _media_secrets.token_hex(6),
+        "file_id": fid,
+        "url": url.strip(),
+        "folder": (folder or "").strip().strip("/"),
+        "status": "queued",
+        "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if name and name.strip():
+        fname = _media_safe_name(name, ".mp4")
+        if not _media_is_allowed(fname):
+            raise HTTPException(status_code=400, detail="نوع ملف غير مسموح — فيديو/صوت فقط")
+        job["dest"] = str(target_dir / fname)
+        job["name"] = fname
+    else:
+        job["dir"] = str(target_dir)
+        job["name"] = "(اسم الملف الأصلي)"
+
+    _MEDIA_JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    jf = _MEDIA_JOBS_DIR / (job["id"] + ".json")
+    jf.write_text(_media_json.dumps(job, ensure_ascii=False), encoding="utf-8")
+
+    helper = str(PROJECT_ROOT / "scripts" / "drive_fetch.py")
+    venv_py = str(PROJECT_ROOT / "venv" / "bin" / "python")
+    _media_subprocess.Popen(
+        [venv_py, helper, str(jf)],
+        start_new_session=True,
+        stdout=_media_subprocess.DEVNULL,
+        stderr=_media_subprocess.DEVNULL,
+    )
+    logger.info("media drive job %s queued: %s", job["id"], fid)
+    return RedirectResponse("/media", status_code=303)
+
+
+@app.get("/media/jobs", include_in_schema=False)
+async def media_jobs(user: User = Depends(current_user)):
+    jobs = []
+    if _MEDIA_JOBS_DIR.is_dir():
+        for jf in _MEDIA_JOBS_DIR.glob("*.json"):
+            try:
+                jobs.append(_media_json.loads(jf.read_text(encoding="utf-8")))
+            except Exception:
+                pass
+    jobs.sort(key=lambda j: j.get("started", ""), reverse=True)
+    return JSONResponse({"jobs": jobs[:20]})
+
+
+@app.post("/media/rename", include_in_schema=False)
+async def media_rename(
+    old: str = Form(...),
+    new: str = Form(...),
+    user: User = Depends(current_user),
+):
+    src = _media_resolve(old)
+    if not src or not src.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    new_name = _media_safe_name(new, src.suffix)
+    if not _media_is_allowed(new_name):
+        raise HTTPException(status_code=400, detail="امتداد غير مسموح")
+    dst = src.parent / new_name
+    if dst.exists() and dst != src:
+        raise HTTPException(status_code=409, detail="name exists")
+    src.rename(dst)
+    logger.info("media rename: %s -> %s", src, dst)
+    return RedirectResponse("/media", status_code=303)
+
+
+@app.get("/media/stream/{rel_path:path}", include_in_schema=False)
+async def media_stream(rel_path: str, request: Request, user: User = Depends(current_user)):
+    full = _media_resolve(rel_path)
+    if not full or not full.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    ext = full.suffix.lower()
+    if ext not in _MEDIA_EXTS:  # never serve non-media inline
+        raise HTTPException(status_code=404, detail="not found")
+    ctype = _MEDIA_MIME.get(ext, "application/octet-stream")  # hardcoded, never sniffed
+    file_size = full.stat().st_size
+    range_header = request.headers.get("range")
+    chunk_size = 1024 * 1024
+    base_headers = {"Accept-Ranges": "bytes", "X-Content-Type-Options": "nosniff"}
+
+    if range_header:
+        m = _media_re.match(r"bytes=(\d+)-(\d*)", range_header)
+        if not m:
+            raise HTTPException(status_code=416, detail="bad range")
+        start = int(m.group(1))
+        end = int(m.group(2)) if m.group(2) else file_size - 1
+        end = min(end, file_size - 1)
+        if start > end:
+            raise HTTPException(status_code=416, detail="bad range")
+        length = end - start + 1
+
+        def gen_range():
+            with open(full, "rb") as f:
+                f.seek(start)
+                remaining = length
+                while remaining > 0:
+                    data = f.read(min(chunk_size, remaining))
+                    if not data:
+                        break
+                    remaining -= len(data)
+                    yield data
+
+        headers = dict(base_headers)
+        headers.update({
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Content-Length": str(length),
+        })
+        return _MediaStreamingResponse(
+            gen_range(), status_code=206, headers=headers, media_type=ctype
+        )
+
+    def gen_all():
+        with open(full, "rb") as f:
+            while True:
+                data = f.read(chunk_size)
+                if not data:
+                    break
+                yield data
+
+    headers = dict(base_headers)
+    headers["Content-Length"] = str(file_size)
+    return _MediaStreamingResponse(gen_all(), media_type=ctype, headers=headers)
+# === MEDIA-LIBRARY-BLOCK END ===

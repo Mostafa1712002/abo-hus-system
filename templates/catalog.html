@@ -1,0 +1,87 @@
+{% include "_head.html" ignore missing %}
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>الكتالوج — {{ channel_name }}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root { --navy:#0f172a; --navy-2:#111c33; --line:#243049; --amber:#fbbf24; }
+    body { background: var(--navy); color:#e2e8f0; font-family: system-ui, "Segoe UI", Tahoma, sans-serif; }
+    .card { background: var(--navy-2); border:1px solid var(--line); border-radius:.75rem; }
+    .bar { background:#1e293b; border-radius:9999px; overflow:hidden; height:.6rem; }
+    .bar > span { display:block; height:100%; background:linear-gradient(90deg,#22c55e,#16a34a); }
+  </style>
+</head>
+<body class="min-h-screen">
+  {% include "_nav.html" %}
+
+  <main class="max-w-6xl mx-auto px-6 py-6">
+    <div class="flex items-center justify-between mb-6">
+      <h1 class="text-2xl font-bold text-amber-300">كتالوج إعادة الرفع — abuhafs.info</h1>
+      <span class="text-xs text-slate-500">تحديث تلقائي كل 15 ث · <span id="ts">{{ now }}</span></span>
+    </div>
+
+    <!-- Totals -->
+    <div id="totals" class="grid grid-cols-2 md:grid-cols-6 gap-3 mb-8">
+      <!-- filled by JS -->
+    </div>
+
+    <!-- Series progress -->
+    <div class="card p-4">
+      <h2 class="text-lg font-semibold text-slate-200 mb-4">تقدّم السحب لكل سلسلة</h2>
+      <div id="series" class="space-y-3"><!-- filled by JS --></div>
+    </div>
+  </main>
+
+  <script>
+    const fmtCard = (label, val, cls) =>
+      `<div class="card p-3 text-center"><div class="text-2xl font-bold ${cls}">${val}</div>
+       <div class="text-xs text-slate-400 mt-1">${label}</div></div>`;
+
+    function renderTotals(t) {
+      const el = document.getElementById('totals');
+      el.innerHTML =
+        fmtCard('إجمالي', t.total ?? 0, 'text-slate-100') +
+        fmtCard('تم تحميله', t.downloaded ?? 0, 'text-green-400') +
+        fmtCard('قيد التحميل', t.downloading ?? 0, 'text-amber-300') +
+        fmtCard('في الانتظار', t.pending ?? 0, 'text-slate-300') +
+        fmtCard('فشل', t.failed ?? 0, 'text-red-400') +
+        fmtCard('مساحة', (t.gb ?? 0) + ' GB', 'text-sky-400');
+    }
+
+    function renderSeries(rows) {
+      const el = document.getElementById('series');
+      el.innerHTML = rows.map(s => {
+        const done = (s.downloaded||0) + (s.skipped||0);
+        return `<div>
+          <div class="flex items-center justify-between text-sm mb-1">
+            <span class="text-slate-200">${s.series || s.series_slug}</span>
+            <span class="text-slate-400 text-xs">
+              ${done}/${s.total} · ${s.pct}%
+              ${s.failed ? `<span class="text-red-400">· فشل ${s.failed}</span>` : ''}
+              ${s.downloading ? `<span class="text-amber-300">· يحمّل ${s.downloading}</span>` : ''}
+              ${s.gb ? `· ${s.gb}GB` : ''}
+            </span>
+          </div>
+          <div class="bar"><span style="width:${s.pct}%"></span></div>
+        </div>`;
+      }).join('');
+    }
+
+    async function refresh() {
+      try {
+        const r = await fetch('/api/catalog', {headers:{'Accept':'application/json'}});
+        if (!r.ok) return;
+        const d = await r.json();
+        renderTotals(d.totals || {});
+        renderSeries(d.series || []);
+        document.getElementById('ts').textContent = new Date().toLocaleString('ar-EG');
+      } catch (e) { /* ignore transient */ }
+    }
+    refresh();
+    setInterval(refresh, 15000);
+  </script>
+</body>
+</html>

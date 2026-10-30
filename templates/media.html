@@ -1,0 +1,203 @@
+{% include "_head.html" ignore missing %}
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>المكتبة — {{ channel_name }}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root { --navy:#0f172a; --navy-2:#111c33; --line:#243049; --amber:#fbbf24; }
+    body { background: var(--navy); color:#e2e8f0; font-family: system-ui, "Segoe UI", Tahoma, sans-serif; }
+    .card { background: var(--navy-2); border:1px solid var(--line); border-radius:.75rem; }
+    .btn { background:#1e293b; border:1px solid var(--line); border-radius:.5rem; padding:.35rem .8rem; color:#e2e8f0; font-size:.8rem; cursor:pointer; }
+    .btn:hover { border-color: var(--amber); color:#fde68a; }
+    .btn-amber { background: var(--amber); color:#0f172a; font-weight:600; border:none; }
+    .btn-amber:hover { background:#fcd34d; }
+    input[type=text], input[type=url], input[type=file] { background:#0b1220; border:1px solid var(--line); border-radius:.5rem; padding:.45rem .7rem; color:#e2e8f0; font-size:.85rem; }
+    input:focus { outline:none; border-color: var(--amber); }
+    .badge { font-size:.7rem; padding:.1rem .5rem; border-radius:9999px; }
+    .b-dl { background:#78350f; color:#fcd34d; }
+    .b-ok { background:#14532d; color:#86efac; }
+    .b-err{ background:#7f1d1d; color:#fca5a5; }
+    .b-q  { background:#334155; color:#cbd5e1; }
+    .tab { padding:.5rem 1rem; border-bottom:2px solid transparent; cursor:pointer; font-size:.85rem; color:#94a3b8; }
+    .tab.active { color:#fde68a; border-color: var(--amber); }
+  </style>
+</head>
+<body class="min-h-screen">
+  {% include "_nav.html" %}
+
+  <main class="max-w-5xl mx-auto px-4 sm:px-6 py-6">
+    <div class="flex items-center justify-between mb-6">
+      <h1 class="text-2xl font-bold text-amber-300">المكتبة — رفع وتشغيل</h1>
+      <span class="text-xs text-slate-500">{{ items|length }} ملف</span>
+    </div>
+
+    <!-- Player -->
+    <div id="playerCard" class="card p-3 mb-6 hidden">
+      <div class="flex items-center justify-between mb-2">
+        <span id="nowPlaying" class="text-sm text-amber-200 font-semibold"></span>
+        <button class="btn" onclick="closePlayer()">إغلاق ✕</button>
+      </div>
+      <video id="player" controls preload="metadata" class="w-full rounded-lg bg-black" style="max-height:60vh"></video>
+    </div>
+
+    <!-- Add new: two ways (tabs) -->
+    <div class="card p-4 mb-6">
+      <div class="flex gap-2 border-b border-slate-700 mb-4">
+        <div id="tabDrive" class="tab active" onclick="showTab('drive')">☁️ من Google Drive</div>
+        <div id="tabUpload" class="tab" onclick="showTab('upload')">⬆️ رفع من جهازي</div>
+      </div>
+
+      <!-- Drive -->
+      <form id="paneDrive" action="/media/drive" method="post"
+            class="grid grid-cols-1 sm:grid-cols-2 gap-3" onsubmit="onDrive(this)">
+        <div class="sm:col-span-2">
+          <label class="block text-xs text-slate-400 mb-1">رابط Google Drive (أو الـID)</label>
+          <input type="text" name="url" placeholder="https://drive.google.com/file/d/.../view" required class="w-full" />
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">الاسم (اختياري)</label>
+          <input type="text" name="name" placeholder="مثال: المجلس 57" class="w-full" />
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">الفولدر (اختياري)</label>
+          <input type="text" name="folder" placeholder="مثال: سنن الترمذي" class="w-full" />
+        </div>
+        <div class="sm:col-span-2 flex items-center gap-3">
+          <button type="submit" class="btn-amber btn">ابدأ التحميل على السيرفر</button>
+          <span class="text-xs text-slate-500">السيرفر يحمّل في الخلفية — تقدر تقفل الصفحة، التحميل يكمّل.</span>
+        </div>
+      </form>
+
+      <!-- Upload -->
+      <form id="paneUpload" action="/media/upload" method="post" enctype="multipart/form-data"
+            class="hidden grid grid-cols-1 sm:grid-cols-2 gap-3" onsubmit="onUpload(this)">
+        <div class="sm:col-span-2">
+          <label class="block text-xs text-slate-400 mb-1">الملف (فيديو / صوت)</label>
+          <input type="file" name="file" accept="video/*,audio/*" required class="w-full" />
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">الاسم (اختياري)</label>
+          <input type="text" name="name" placeholder="مثال: المجلس 57" class="w-full" />
+        </div>
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">الفولدر (اختياري)</label>
+          <input type="text" name="folder" placeholder="مثال: سنن الترمذي" class="w-full" />
+        </div>
+        <div class="sm:col-span-2 flex items-center gap-3">
+          <button type="submit" class="btn-amber btn">رفع</button>
+          <span id="upMsg" class="text-xs text-slate-400">لا تغلق الصفحة أثناء الرفع.</span>
+        </div>
+      </form>
+    </div>
+
+    <!-- Active jobs -->
+    <div id="jobsCard" class="card p-4 mb-6 hidden">
+      <h2 class="text-lg font-semibold text-slate-200 mb-3">تحميلات Google Drive</h2>
+      <div id="jobs" class="space-y-2 text-sm"></div>
+    </div>
+
+    <!-- Files -->
+    <div class="card p-4">
+      <h2 class="text-lg font-semibold text-slate-200 mb-4">الملفات</h2>
+      {% if items %}
+      <div class="space-y-2">
+        {% for it in items %}
+        <div class="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 py-2 border-b border-slate-800 last:border-0">
+          <div class="flex-1 min-w-0">
+            <div class="text-slate-100 truncate">{{ "🎧" if it.is_audio else "🎬" }} {{ it.name }}</div>
+            <div class="text-xs text-slate-500">
+              {% if it.folder %}<span class="text-slate-400">{{ it.folder }}</span> · {% endif %}{{ it.size_mb }} MB
+            </div>
+          </div>
+          <div class="flex items-center gap-2 shrink-0">
+            <button class="btn" onclick="play('{{ it.rel|e }}', '{{ it.name|e }}', {{ 'true' if it.is_audio else 'false' }})">▶ تشغيل</button>
+            <button class="btn" onclick="toggleRename('r{{ loop.index }}')">✎ تسمية</button>
+          </div>
+          <form action="/media/rename" method="post" id="r{{ loop.index }}" class="hidden w-full sm:w-auto flex items-center gap-2">
+            <input type="hidden" name="old" value="{{ it.rel|e }}" />
+            <input type="text" name="new" value="{{ it.name|e }}" class="flex-1 sm:w-56" required />
+            <button type="submit" class="btn-amber btn">حفظ</button>
+          </form>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="text-slate-500 text-sm">لا توجد ملفات بعد. أضف أول ملف من الأعلى (Drive أو رفع).</p>
+      {% endif %}
+    </div>
+  </main>
+
+  <script>
+    const player = document.getElementById('player');
+    const playerCard = document.getElementById('playerCard');
+    const nowPlaying = document.getElementById('nowPlaying');
+
+    function play(rel, label, isAudio) {
+      player.src = '/media/stream/' + encodeURIComponent(rel).replace(/%2F/g, '/');
+      nowPlaying.textContent = (isAudio ? '🎧 ' : '🎬 ') + label;
+      playerCard.classList.remove('hidden');
+      player.play().catch(() => {});
+      playerCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    function closePlayer() {
+      player.pause();
+      player.removeAttribute('src');
+      player.load();
+      playerCard.classList.add('hidden');
+    }
+    function toggleRename(id) { document.getElementById(id).classList.toggle('hidden'); }
+    function showTab(which) {
+      const drive = which === 'drive';
+      document.getElementById('paneDrive').classList.toggle('hidden', !drive);
+      document.getElementById('paneUpload').classList.toggle('hidden', drive);
+      document.getElementById('tabDrive').classList.toggle('active', drive);
+      document.getElementById('tabUpload').classList.toggle('active', !drive);
+    }
+    function onUpload(form) {
+      document.getElementById('upMsg').textContent = '⏳ جارٍ الرفع...';
+      form.querySelector('button[type=submit]').disabled = true;
+    }
+    function onDrive(form) {
+      form.querySelector('button[type=submit]').disabled = true;
+      setTimeout(() => { form.querySelector('button[type=submit]').disabled = false; }, 1500);
+    }
+
+    // --- poll Drive jobs ---
+    const BADGE = { queued:['b-q','في الانتظار'], downloading:['b-dl','يحمّل…'], done:['b-ok','تم'], error:['b-err','فشل'] };
+    let prevActive = 0;
+    async function pollJobs() {
+      try {
+        const r = await fetch('/media/jobs', { headers: { 'Accept':'application/json' } });
+        if (!r.ok) return;
+        const d = await r.json();
+        const jobs = d.jobs || [];
+        const card = document.getElementById('jobsCard');
+        const box = document.getElementById('jobs');
+        if (!jobs.length) { card.classList.add('hidden'); return; }
+        card.classList.remove('hidden');
+        box.innerHTML = jobs.map(j => {
+          const [cls, label] = BADGE[j.status] || ['b-q', j.status];
+          const meta = j.status === 'done' ? `${j.size_mb||''} MB`
+                     : j.status === 'error' ? `<span class="text-red-300">${(j.message||'').replace(/</g,'&lt;')}</span>`
+                     : (j.started||'');
+          return `<div class="flex items-center justify-between gap-2 border-b border-slate-800 pb-1">
+            <span class="truncate text-slate-200">${(j.name||'').replace(/</g,'&lt;')}
+              ${j.folder ? `<span class="text-slate-500 text-xs">· ${j.folder.replace(/</g,'&lt;')}</span>`:''}</span>
+            <span class="flex items-center gap-2 shrink-0">
+              <span class="text-xs text-slate-400">${meta}</span>
+              <span class="badge ${cls}">${label}</span></span></div>`;
+        }).join('');
+        const active = jobs.filter(j => j.status==='queued' || j.status==='downloading').length;
+        // a download just finished -> refresh the file list
+        if (prevActive > 0 && active === 0) { setTimeout(() => location.reload(), 800); }
+        prevActive = active;
+      } catch (e) { /* ignore transient */ }
+    }
+    pollJobs();
+    setInterval(pollJobs, 4000);
+  </script>
+</body>
+</html>
