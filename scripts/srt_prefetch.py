@@ -26,7 +26,8 @@ AHEAD = int(sys.argv[1]) if len(sys.argv) > 1 else 3
 
 
 def whisper(yt_id):
-    q = urllib.parse.urlencode({"youtube": f"https://www.youtube.com/watch?v={yt_id}",
+    # whisper keys its queue and srt cache by the raw param, so it needs the bare id
+    q = urllib.parse.urlencode({"youtube": yt_id,
                                 "lang": "ar", "onlyText": 0})
     with urllib.request.urlopen(f"{WHISPER}?{q}", timeout=120) as r:
         body = r.read().decode("utf-8", errors="replace")
