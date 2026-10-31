@@ -1,8 +1,13 @@
-"""Download catalog videos (from abuhafs.info) to the VPS via loader.to.
+"""Download catalog videos (from abuhafs.info) to the VPS with yt-dlp over Cloudflare WARP.
 
 Pulls rows from catalog_videos where download_status='pending', downloads the
-mp4 with loader.to (bypasses YouTube's datacenter block), and updates the
-tracking row. Series-by-series, resumable, storage-guarded.
+mp4 and updates the tracking row. Series-by-series, resumable, storage-guarded.
+
+YouTube answers this datacenter IP with "Sign in to confirm you're not a bot",
+and loader.to (the old workaround) has required a paid API key for server use
+since 2026-10-27. So yt-dlp goes out through the local WARP client, which runs
+in proxy-only mode (`warp-cli mode proxy`, SOCKS5 on 127.0.0.1:40000) and
+leaves the box's own traffic untouched.
 
 Usage:
   python catalog_download_worker.py --series <slug> [--limit N] [--format 720]
@@ -13,13 +18,11 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import json
 import shutil
 import sqlite3
+import subprocess
 import sys
 import time
-import urllib.parse
-import urllib.request
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -27,51 +30,41 @@ sys.stdout.reconfigure(encoding="utf-8")
 ROOT = Path("/opt/abuhafs/youtube-auto-uploader")
 DB = ROOT / "data" / "abuhafs.db"
 WORKSPACE = Path("/opt/abuhafs/catalog_workspace")
-MIN_FREE_GB = 15          # stop downloading if free space drops below this
-POLITE_DELAY = 4          # seconds between downloads (be nice to loader.to)
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+MIN_FREE_GB = 10          # stop downloading if free space drops below this (buffer is only ~5 videos)
+POLITE_DELAY = 4          # seconds between downloads
+WARP_PROXY = "socks5://127.0.0.1:40000"
 
 
-def _get(url: str, timeout: int = 30) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": "https://loader.to/"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
+def _ytdlp(yt_id: str, out_path: Path, fmt: str) -> None:
+    height = fmt if str(fmt).isdigit() else "720"
+    cmd = [sys.executable, "-m", "yt_dlp", "-q", "--no-warnings", "--no-part", "--no-playlist",
+           "--proxy", WARP_PROXY,
+           "-f", f"bv*[height<={height}][vcodec^=avc1]+ba[ext=m4a]/bv*[height<={height}]+ba/b[height<={height}]",
+           "--merge-output-format", "mp4", "-o", str(out_path),
+           f"https://www.youtube.com/watch?v={yt_id}"]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    if r.returncode != 0 or not out_path.exists():
+        raise RuntimeError(f"yt-dlp rc={r.returncode}: {(r.stderr or r.stdout).strip()[-250:]}")
 
 
 def loader_download(yt_id: str, out_path: Path, fmt: str = "720") -> dict:
-    yt_url = f"https://www.youtube.com/watch?v={yt_id}"
-    api = "https://loader.to/ajax/download.php?" + urllib.parse.urlencode({"format": fmt, "url": yt_url})
-    data = json.loads(_get(api))
-    jid = data.get("id")
-    if not jid:
-        raise RuntimeError(f"no job id: {data}")
-    # poll
-    dl_url = ""
-    waited = 0
-    while waited < 2400:  # up to 40 min for very long lectures
-        p = json.loads(_get("https://loader.to/ajax/progress.php?id=" + jid))
-        dl_url = p.get("download_url") or ""
-        if dl_url:
+    """Download one video to out_path (name kept from the loader.to days; local_feed imports it)."""
+    for attempt, wait in enumerate((20, 60, 0), 1):
+        try:
+            _ytdlp(yt_id, out_path, fmt)
             break
-        if p.get("success") == 0 and str(p.get("text", "")).lower() in ("error", "failed"):
-            raise RuntimeError(f"job failed: {p}")
-        time.sleep(5)
-        waited += 5
-    if not dl_url:
-        raise TimeoutError("no download_url before timeout")
-    # fetch file
-    req = urllib.request.Request(dl_url, headers={"User-Agent": UA})
-    total = 0
-    with urllib.request.urlopen(req, timeout=900) as r, open(out_path, "wb") as f:
-        while True:
-            chunk = r.read(1 << 20)
-            if not chunk:
-                break
-            f.write(chunk)
-            total += len(chunk)
+        except Exception:
+            # --no-part leaves half-written stream files (x.f140.m4a ...) that make the
+            # next try resume past their end (HTTP 416) — start clean
+            for frag in out_path.parent.glob(out_path.stem + ".f*"):
+                frag.unlink(missing_ok=True)
+            if attempt == 3:
+                raise
+            time.sleep(wait)
+    total = out_path.stat().st_size
     if total < 10000:
-        raise RuntimeError(f"file too small ({total} bytes) — likely a download error page")
-    return {"job_id": jid, "download_url": dl_url, "bytes": total}
+        raise RuntimeError(f"file too small ({total} bytes)")
+    return {"job_id": "", "download_url": "", "bytes": total}
 
 
 def free_gb(path: Path) -> float:

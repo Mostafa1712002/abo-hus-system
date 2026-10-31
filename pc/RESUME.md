@@ -43,3 +43,8 @@ Everything here is safe to rerun. Each script skips work that is already done.
 - **Migration:** all 10 zips were moved server to server (`scripts/migrate_cold_to_vps.sh`, log `logs/migrate_cold.log` on the VPS) and deleted from tarweig.
 - **Feeding:** `local_feed.py` now moves `file://` episodes out of `/opt/abuhafs/archive`, so the archive shrinks as the lanes publish.
 - **Old refs:** `cold://` refs (tarweig) are still supported, in case any are left.
+
+## Source episodes are downloaded on the VPS (2026-10-31)
+- yt-dlp works on the VPS again through Cloudflare WARP (proxy-only mode).
+- Episodes from قناة التأصيل that are still 'source' (الترمذي 16–63, الرقاق 22–34, الاعتقاد 9) are downloaded by the lane itself when their turn comes.
+- **Do not rerun `source_pipeline.py`.** Only `zip_and_upload.py` (the user's own archive) is still needed from this PC.

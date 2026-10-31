@@ -102,3 +102,16 @@ First end-to-end lane run: 2026-10-30 المدخل 40 → https://youtu.be/jBsv6
 - **شرح الرسالة:** complete (25/25 on the channel). Its 04:00 cron was removed; it had been failing daily on a missing tarweig zip.
 - **pending.json:** the stale item (العبودية 1, `yDrUI6GxURc`) had been polling captions every 15 min for a video that is no longer on YouTube (4,500+ checks). It is marked completed.
 - **2026-10-31, lane times.** The VPS cron ignores `CRON_TZ`, so all times are UTC; the lanes had been firing at 13:00–17:00 Cairo. They were moved to `0 9..13 * * *` UTC, which is 11:00–15:00 Cairo (EET).
+
+## Downloads fixed: yt-dlp over Cloudflare WARP (2026-10-31)
+- **Problem:** loader.to answers servers with `api_key_required` (paid key) since 2026-10-27, and YouTube bot-blocks this datacenter IP for every yt-dlp client.
+- **Fix:** Cloudflare WARP is installed on the VPS in **proxy-only mode** (`warp-cli mode proxy`, SOCKS5 `127.0.0.1:40000`, Always On, `warp-svc` enabled). The box's own traffic is untouched; only yt-dlp goes through the proxy.
+  - `scripts/catalog_download_worker.py` `loader_download()` now runs yt-dlp through that proxy, with 3 tries that clear stale `.f*` fragments between attempts. The name is kept because `local_feed.py` imports it.
+  - Measured speed: a 1-hour 240p episode (~115 MB) downloads in ~25 s.
+  - venv yt-dlp was upgraded to 2026.10.26.
+- **Effect:**
+  - The catalog re-upload (1,222 pending rows) works again through `feed_and_advance.sh` (every 30 min).
+  - Source-channel episodes ('source' rows) are downloaded by the VPS itself when their lane reaches them. `pc/source_pipeline.py` is no longer needed (stopped 2026-10-31), which saves the home uplink.
+- **Catalog crons:** they ran at 09 and 10 UTC, the same hours as the lanes. Those two moved to 14 and 15 UTC, giving catalog runs at 05–08, 14–15 and 18–21 UTC with 1 video each.
+- **Disk guard:** `MIN_FREE_GB` was lowered from 15 to 10. The download buffer is only about 5 videos.
+- **Debugging:** if downloads fail again, run `warp-cli --accept-tos status`, then `curl --socks5-hostname 127.0.0.1:40000 https://ifconfig.me`.
