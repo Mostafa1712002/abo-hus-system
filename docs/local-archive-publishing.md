@@ -79,3 +79,26 @@ First end-to-end lane run: 2026-10-30 المدخل 40 → https://youtu.be/jBsv6
   - **18 with no copy anywhere (`L-` ids):** set to `download_status='broken'`. `local_feed.py` holds the lane at a broken row so episode order is kept until a good file is supplied or the row is skipped by hand.
   - **DB backup:** `abuhafs.db.bak.brokenaudio.*`.
 - **2026-10-30, user decision:** the 18 'broken' rows were skipped (`download_status='skipped'`, `process_status='skipped'`; DB backup `abuhafs.db.bak.skipbroken.*`). The lanes go straight past them. Skipped: الاعتقاد 11, 19–21 · المدخل 68 · الترمذي 66–70, 73, 78, 79 · فضائل الصحابة 1–3, 5 · الرقاق 35.
+- **2026-10-30, singles.** The user's rule is that anything already on our channel is deleted locally.
+  - **Added** as series «دروس ومحاضرات متفرقة» (`local-mtfrkat`, appended to the 14:00 lane): المنهج السلفي, كلمة تونس.
+  - **Deleted locally as duplicates of our channel:**
+    - الإيمان لابن أبي شيبة: playlist «الإيمان للإمام ابن أبي شيبة», 5 parts, 5.47 h vs 5.76 h local. The row is skipped.
+    - شرح مختصر الصارم المسلول: playlist «الصارم المسلول على شاتم الرسول ﷺ.», 4 parts, 3.34 h vs 3.96 h local.
+  - **Held in `C:\videos\_review` pending the speaker check:**
+    - تراجم: way2allah.com TV-studio recordings, which look like a different speaker.
+    - الصحيفة والثلاثيات: no title card.
+
+## Storage moved to the VPS; tarweig retired (2026-10-30)
+- **Why:** the tarweig cPanel account `abuhafsi` is capped at **10 GB** and filled up. The server is being deleted on 2026-10-31.
+- **New flow:** PC jobs (`pc/zip_and_upload.py`, `pc/source_pipeline.py`, run from `C:\videos\_pipeline`) upload zips to `/opt/abuhafs/archive_in` on the VPS.
+  - `scripts/archive_ingest.py` CRC-tests each zip, unpacks it to `/opt/abuhafs/archive/<zip stem>/`, and repoints rows to `file://…`.
+  - Renames are passed for archive zips and `mark` for source batches; then the zip is deleted.
+  - Local files are deleted only after the ingest succeeds. `shipped.json` is the ledger.
+- **Feeder:** `local_feed.py` moves `file://` episodes into the workspace, so the archive shrinks as lanes publish. `cold://` is still understood.
+- **Migration:** the 10 zips already on tarweig were moved server to server (`scripts/migrate_cold_to_vps.sh`) and removed from tarweig.
+  - The `~/mig` folder (pre-move DB dump, crontab, DNS zone) is backed up to `/root/tarweig_backup/mig`.
+- **Main pipeline:** `config.json` `cold_storage` is disabled and the tarweig host removed (backup `config.json.bak.notarweig.*`).
+  - Series now come from `/opt/abuhafs/videos_workspace` or `/opt/abuhafs/zips_archive/<series>.zip`.
+- **شرح الرسالة:** complete (25/25 on the channel). Its 04:00 cron was removed; it had been failing daily on a missing tarweig zip.
+- **pending.json:** the stale item (العبودية 1, `yDrUI6GxURc`) had been polling captions every 15 min for a video that is no longer on YouTube (4,500+ checks). It is marked completed.
+- **2026-10-31, lane times.** The VPS cron ignores `CRON_TZ`, so all times are UTC; the lanes had been firing at 13:00–17:00 Cairo. They were moved to `0 9..13 * * *` UTC, which is 11:00–15:00 Cairo (EET).

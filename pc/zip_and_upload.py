@@ -1,11 +1,15 @@
-"""Zip each series folder under C:\\videos\\data (STORE) and upload to cold storage.
+"""Compress, zip and upload each series folder under C:\\videos\\data to the VPS.
 
 Videos are re-encoded to small H.264 .mp4 first (compress.py, ~70% smaller) to
-spare the home uplink; once a zip is on cold storage the catalog rows are
-repointed to the new member names on the VPS (scripts/local_rename_members.py).
+spare the home uplink. One zip per folder goes to /opt/abuhafs/archive_in on the
+VPS, where scripts/archive_ingest.py CRC-tests and unpacks it into
+/opt/abuhafs/archive/<folder>/ and repoints the catalog rows (old .avi/.rmvb
+member names -> the compressed .mp4). Only after that succeeds are the zip, the
+compressed copies and the originals deleted from this PC.
 
-Resumable: skips a series whose zip already exists remotely with the same size.
-Remote: abuhafsi@213.239.209.167:22422 ~/videos_cold_zips/<series>.zip
+Resumable: shipped.json lists the zips already ingested on the VPS, and those
+folders are never rebuilt. (Until 2026-10-30 the zips went to the tarweig cold
+storage, whose account is capped at 10 GB; they were moved to the VPS.)
 """
 import json, shutil, subprocess, sys, zipfile, time
 from pathlib import Path
@@ -13,28 +17,29 @@ from pathlib import Path
 from compress import compress
 
 sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
+HERE = Path(__file__).resolve().parent
 SRC = Path(r"C:\videos\data")
 TMP = Path(r"C:\videos\_zips")
 TC = Path(r"C:\videos\_tc")  # re-encoded copies, per folder
-HOST = "abuhafsi@213.239.209.167"
-PORT = "22422"
-REMOTE = "videos_cold_zips"
+HOST = "root@178.104.122.98"
+INBOX = "/opt/abuhafs/archive_in"
+APP = "/opt/abuhafs/youtube-auto-uploader"
 SKIP = {"_duplicates", "الكتب مفرغة"}
 VIDEO_EXT = {".avi", ".mp4", ".wmv", ".rmvb", ".rm", ".mkv", ".flv", ".mpg", ".mov", ".wma"}
-SSH = ["ssh", "-o", "BatchMode=yes", "-p", PORT, HOST]
-VPS = ["ssh", "-o", "BatchMode=yes", "root@178.104.122.98"]
+SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=4", HOST]
+LEDGER = HERE / "shipped.json"
 # damaged audio track (audio_scan.py): not shipped; the DB rows were moved to
-# 'source' (re-downloaded from the source channel) or 'broken' (lane waits)
-BROKEN = {l.strip() for l in open(Path(__file__).with_name("broken_audio.txt"), encoding="utf-8") if l.strip()}
+# 'source' (re-downloaded from the source channel) or skipped
+BROKEN = {l.strip() for l in open(HERE / "broken_audio.txt", encoding="utf-8") if l.strip()}
 
 
-def remote_size(name):
-    r = subprocess.run(SSH + [f"stat -c %s '{REMOTE}/{name}' 2>/dev/null || echo -1"],
-                       capture_output=True, text=True, encoding="utf-8")
-    try:
-        return int(r.stdout.strip().splitlines()[-1])
-    except Exception:
-        return -1
+def shipped():
+    return set(json.load(open(LEDGER, encoding="utf-8"))) if LEDGER.exists() else set()
+
+
+def mark_shipped(name):
+    s = shipped() | {name}
+    json.dump(sorted(s), open(LEDGER, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 
 
 def build_zip(d, files, name, zp):
@@ -45,7 +50,7 @@ def build_zip(d, files, name, zp):
         if compress(f, out):
             members.append(out)
             if out.name != f.name:
-                renames.append({"zip": name, "old": f.name, "new": out.name})
+                renames.append({"old": f.name, "new": out.name})
         else:
             members.append(f)
     src_mb = sum(f.stat().st_size for f in files) / 1e6
@@ -59,26 +64,41 @@ def build_zip(d, files, name, zp):
     return renames
 
 
-def finish(d, name, zp, renames_file):
-    """Zip is safely on cold storage: repoint the DB rows, drop local temp copies."""
-    renames = json.load(open(renames_file, encoding="utf-8"))
-    res = subprocess.run(VPS + ["cd /opt/abuhafs/youtube-auto-uploader && "
-                                "venv/bin/python scripts/local_rename_members.py"],
-                         input=json.dumps(renames, ensure_ascii=False), capture_output=True,
+def upload(zp, name):
+    """scp to the inbox as .part, then rename. Returns True when the full file is there."""
+    part = f"{INBOX}/{name}.part"
+    # scp (SFTP mode) overwrites a leftover .part in place without truncating
+    subprocess.run(SSH + [f"mkdir -p {INBOX}; rm -f '{part}'"])
+    for wait in (60, 180, 600, 0):  # ride out short network drops
+        r = subprocess.run(["scp", "-q", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=30",
+                            "-o", "ServerAliveCountMax=4", str(zp), f"{HOST}:{part}"])
+        if r.returncode == 0:
+            break
+        print(f"   scp rc={r.returncode}, retrying in {wait}s")
+        time.sleep(wait)
+    if r.returncode != 0:
+        return False
+    out = subprocess.run(SSH + [f"mv '{part}' '{INBOX}/{name}' && stat -c %s '{INBOX}/{name}'"],
+                         capture_output=True, text=True, encoding="utf-8").stdout.strip()
+    return out.endswith(str(zp.stat().st_size))
+
+
+def ingest(name, payload):
+    res = subprocess.run(SSH + [f"cd {APP} && venv/bin/python scripts/archive_ingest.py "
+                                f"'{INBOX}/{name}' '{name}'"],
+                         input=json.dumps(payload, ensure_ascii=False), capture_output=True,
                          text=True, encoding="utf-8")
-    print(f"   {res.stdout.strip()} {res.stderr.strip()[-200:]}")
-    if res.returncode != 0:
-        print(f"!! repoint failed for {name} — keeping {renames_file.name}")
-        return
-    zp.unlink()
-    renames_file.unlink()
-    shutil.rmtree(TC / d.name, ignore_errors=True)
+    line = (res.stdout.strip().splitlines() or ["{}"])[-1]
+    print(f"   ingest: {line} {res.stderr.strip()[-200:]}")
+    try:
+        return json.loads(line).get("ok") is True
+    except ValueError:
+        return False
 
 
 def main():
     TMP.mkdir(exist_ok=True)
-    subprocess.run(SSH + [f"mkdir -p {REMOTE}"], check=True)
-    # lane order: weekly series first (smallest first so lanes start sooner), then the rest
+    # lane order: weekly series first, then the rest
     PRIORITY = ["اعتقاد لأهل السنة للإسماعيلي", "كتاب الرقاق", "كتاب القدر", "سنن الترمذي", "المدخل",
                 "المتجر الرابح", "شرح كتاب فضائل الصحابة من صحيبح البخاري", "شرح كتاب طريق الوصول",
                 "الفوائد", "فتح المغيث", "شرح جزءأبي عمروالداني"]
@@ -86,37 +106,40 @@ def main():
     folders = sorted((d for d in SRC.iterdir() if d.is_dir() and d.name not in SKIP),
                      key=lambda d: (rank.get(d.name, 99), d.name))
     for d in folders:
+        name = f"{d.name}.zip"
+        if name in shipped():
+            print(f"== already on the VPS: {name}")
+            continue
         files = sorted(f for f in d.iterdir() if f.is_file() and f.suffix.lower() in VIDEO_EXT
                        and f"{d.name}/{f.name}" not in BROKEN)
         if not files:
             print(f"-- skip (no videos): {d.name}")
             continue
-        name = f"{d.name}.zip"
         zp = TMP / name
         renames_file = TMP / (name + ".renames.json")
         t0 = time.time()
         if not zp.exists() or not renames_file.exists():
             renames = build_zip(d, files, name, zp)
             json.dump(renames, open(renames_file, "w", encoding="utf-8"), ensure_ascii=False)
+        renames = [{"old": r["old"], "new": r["new"]} for r in json.load(open(renames_file, encoding="utf-8"))]
         size = zp.stat().st_size
-        if remote_size(name) == size:
-            print(f"== already uploaded: {name} ({size/1e9:.2f} GB)")
-            finish(d, name, zp, renames_file)
-            continue
         print(f">> uploading {name}: {len(files)} files, {size/1e9:.2f} GB", flush=True)
-        r = subprocess.run(["scp", "-q", "-o", "BatchMode=yes", "-P", PORT, str(zp),
-                            f"{HOST}:{REMOTE}/{name}.part"])
-        if r.returncode != 0:
-            print(f"!! scp failed for {name} (rc={r.returncode}) — rerun to resume")
+        if not upload(zp, name):
+            print(f"!! upload failed for {name} — rerun to resume")
             continue
-        subprocess.run(SSH + [f"mv '{REMOTE}/{name}.part' '{REMOTE}/{name}'"], check=True)
-        rs = remote_size(name)
-        if rs == size:
-            dt = time.time() - t0
-            print(f"OK {name} {size/1e9:.2f} GB in {dt/60:.1f} min ({size/dt/1e6:.1f} MB/s)")
-            finish(d, name, zp, renames_file)
-        else:
-            print(f"!! size mismatch {name}: local {size} remote {rs}")
+        dt = time.time() - t0
+        print(f"OK {name} {size/1e9:.2f} GB in {dt/60:.1f} min ({size/dt/1e6:.2f} MB/s)")
+        if not ingest(name, {"renames": renames}):
+            print(f"!! ingest failed for {name} — local files kept")
+            continue
+        mark_shipped(name)
+        # safely unpacked on the VPS: drop the zip, the compressed copies and the originals
+        zp.unlink()
+        renames_file.unlink()
+        shutil.rmtree(TC / d.name, ignore_errors=True)
+        for f in files:
+            f.unlink(missing_ok=True)
+        print(f"   deleted {len(files)} originals from {d}")
     print("DONE")
 
 

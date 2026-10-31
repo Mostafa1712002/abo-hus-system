@@ -9,6 +9,7 @@ otherwise the lowest-ord 'local' row is streamed out of its zip on cold storage
 Prints the slug to process on stdout (empty = lane finished).
 Usage: local_feed.py <slug> [<slug> ...]
 """
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -70,19 +71,29 @@ def main():
             con.commit()
             print(slug)
             return
-        zip_name, member = row["mp4_path"][len("cold://"):].split("/", 1)
-        dest = dest_dir / member
-        tmp = dest.with_name(dest.name + ".part")
-        # quote for the remote shell; Arabic names have spaces
-        remote = f"unzip -p '{COLD_ZIPS}/{zip_name}' '{member}'"
-        log(f"feed {slug} ord={row['ord']}: {zip_name} :: {member}")
-        with open(tmp, "wb") as fh:
-            r = subprocess.run(COLD + [remote], stdout=fh)
-        if r.returncode != 0 or tmp.stat().st_size < 1024 * 1024:
-            tmp.unlink(missing_ok=True)
-            log(f"feed failed (rc={r.returncode}) — zip not on cold storage yet?")
-            return
-        tmp.rename(dest)
+        if row["mp4_path"].startswith("file://"):
+            # unpacked on this box by archive_ingest.py: move it, so the archive shrinks
+            src = Path(row["mp4_path"][len("file://"):])
+            dest = dest_dir / src.name
+            log(f"feed {slug} ord={row['ord']}: {src}")
+            if not src.exists():
+                log("feed failed — archive file missing")
+                return
+            shutil.move(str(src), str(dest))
+        else:
+            zip_name, member = row["mp4_path"][len("cold://"):].split("/", 1)
+            dest = dest_dir / member
+            tmp = dest.with_name(dest.name + ".part")
+            # quote for the remote shell; Arabic names have spaces
+            remote = f"unzip -p '{COLD_ZIPS}/{zip_name}' '{member}'"
+            log(f"feed {slug} ord={row['ord']}: {zip_name} :: {member}")
+            with open(tmp, "wb") as fh:
+                r = subprocess.run(COLD + [remote], stdout=fh)
+            if r.returncode != 0 or tmp.stat().st_size < 1024 * 1024:
+                tmp.unlink(missing_ok=True)
+                log(f"feed failed (rc={r.returncode}) — zip not on cold storage yet?")
+                return
+            tmp.rename(dest)
         con.execute(
             "UPDATE catalog_videos SET download_status='downloaded', mp4_path=?, "
             "download_bytes=?, downloaded_at=CURRENT_TIMESTAMP, download_quality='local', "

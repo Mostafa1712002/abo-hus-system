@@ -1,6 +1,8 @@
 """Download source-channel episodes on this PC (residential IP — loader.to and
 YouTube block the VPS), zip them, upload to cold storage, then flip the
 catalog rows from 'source' to 'local' so the daily lanes pick them up.
+(Since 2026-10-30 the zips go to the VPS and are unpacked there by
+scripts/archive_ingest.py; the tarweig account is capped at 10 GB.)
 
 Each download is re-encoded to small H.264 (compress.py) before zipping to
 spare the home uplink. Episodes ship in batches of BATCH per series, taken
@@ -16,6 +18,7 @@ import zipfile
 from pathlib import Path
 
 from compress import compress
+from zip_and_upload import ingest, mark_shipped, shipped, upload
 
 sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 HERE = Path(__file__).resolve().parent
@@ -23,9 +26,6 @@ ROWS = json.load(open(HERE / "source_rows.json", encoding="utf-8"))
 DL = Path(r"C:\videos\source_dl")
 TC = Path(r"C:\videos\source_tc")  # compressed copies that go into the zip
 TMP = Path(r"C:\videos\_zips")
-HOST, PORT, REMOTE = "abuhafsi@213.239.209.167", "22422", "videos_cold_zips"
-COLD = ["ssh", "-o", "BatchMode=yes", "-p", PORT, HOST]
-VPS = ["ssh", "-o", "BatchMode=yes", "root@178.104.122.98"]
 BATCH = 10
 SERIES = [  # slug, folder, file prefix  (order = which lane needs it first)
     ("snn-alamam-altrmthy", "سنن الترمذي", "الترمذي"),
@@ -43,15 +43,6 @@ def fname(prefix, ord_):
     return f"{prefix} {ord_}.mp4"
 
 
-def remote_size(name):
-    r = subprocess.run(COLD + [f"stat -c %s '{REMOTE}/{name}' 2>/dev/null || echo -1"],
-                       capture_output=True, text=True, encoding="utf-8")
-    try:
-        return int(r.stdout.strip().splitlines()[-1])
-    except Exception:
-        return -1
-
-
 def download(yt_id, out):
     if out.exists() and out.stat().st_size > 1_000_000:
         return True
@@ -62,17 +53,22 @@ def download(yt_id, out):
                             f"https://www.youtube.com/watch?v={yt_id}"])
         if r.returncode == 0 and out.exists():
             return True
+        # --no-part leaves half-written stream files (name.f140.m4a ...); yt-dlp then
+        # tries to resume past their end and gets HTTP 416 forever — start clean
+        for frag in out.parent.glob(out.stem + ".f*"):
+            frag.unlink(missing_ok=True)
         time.sleep(wait)
     return False
 
 
 def ship(folder, prefix, zip_name, rows):
-    """Download + compress + zip + upload one batch, then mark its rows local.
-    Returns the rows that could not be downloaded."""
-    zp = TMP / zip_name
-    if not zp.exists() and remote_size(zip_name) > 0:
-        print(f"== already on cold storage: {zip_name}")
+    """Download + compress + zip + upload one batch to the VPS, where
+    archive_ingest.py unpacks it and marks its rows local; then the local copies
+    are deleted. Returns the rows that could not be downloaded."""
+    if zip_name in shipped():
+        print(f"== already on the VPS: {zip_name}")
         return []
+    zp = TMP / zip_name
     done, failed = [], []
     for r in rows:
         out = DL / folder / fname(prefix, r["ord"])
@@ -94,24 +90,19 @@ def ship(folder, prefix, zip_name, rows):
         tmp.rename(zp)
     size = zp.stat().st_size
     print(f">> uploading {zip_name}: {len(done)} files, {size/1e6:.0f} MB")
-    rc = subprocess.run(["scp", "-q", "-o", "BatchMode=yes", "-P", PORT, str(zp),
-                         f"{HOST}:{REMOTE}/{zip_name}.part"]).returncode
-    if rc != 0:
-        print(f"!! scp failed {zip_name} — rerun to resume")
+    if not upload(zp, zip_name):
+        print(f"!! upload failed {zip_name} — rerun to resume")
         return failed
-    subprocess.run(COLD + [f"mv '{REMOTE}/{zip_name}.part' '{REMOTE}/{zip_name}'"], check=True)
-    if remote_size(zip_name) != size:
-        print(f"!! size mismatch {zip_name}")
+    mark = [{"youtube_id": r["youtube_id"], "member": out.name} for r, out in done]
+    if not ingest(zip_name, {"mark": mark}):
+        print(f"!! ingest failed {zip_name} — local files kept")
         return failed
-    items = [{"youtube_id": r["youtube_id"], "ref": f"cold://{zip_name}/{out.name}",
-              "size": out.stat().st_size} for r, out in done]
-    res = subprocess.run(VPS + ["cd /opt/abuhafs/youtube-auto-uploader && "
-                                "venv/bin/python scripts/local_mark_cold.py"],
-                         input=json.dumps(items, ensure_ascii=False), capture_output=True,
-                         text=True, encoding="utf-8")
-    print(f"OK {zip_name}: {res.stdout.strip()} {res.stderr.strip()[-200:]}")
-    if res.returncode == 0:
-        zp.unlink()
+    mark_shipped(zip_name)
+    zp.unlink()
+    for _, out in done:  # unpacked on the VPS: drop the download and the compressed copy
+        (DL / folder / out.name).unlink(missing_ok=True)
+        (TC / folder / out.name).unlink(missing_ok=True)
+    print(f"OK {zip_name}: {len(done)} episodes on the VPS, local copies deleted")
     return failed
 
 
