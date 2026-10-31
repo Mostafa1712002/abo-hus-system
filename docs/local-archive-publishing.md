@@ -115,3 +115,8 @@ First end-to-end lane run: 2026-10-30 المدخل 40 → https://youtu.be/jBsv6
 - **Catalog crons:** they ran at 09 and 10 UTC, the same hours as the lanes. Those two moved to 14 and 15 UTC, giving catalog runs at 05–08, 14–15 and 18–21 UTC with 1 video each.
 - **Disk guard:** `MIN_FREE_GB` was lowered from 15 to 10. The download buffer is only about 5 videos.
 - **Debugging:** if downloads fail again, run `warp-cli --accept-tos status`, then `curl --socks5-hostname 127.0.0.1:40000 https://ifconfig.me`.
+- **2026-10-31, end of the archive upload.**
+  - All series are on the VPS: 255 `file://` rows plus 54 'source' rows fetched through WARP.
+  - The 34 damaged local files were deleted with the user's OK.
+  - **الترمذي 67:** its AVI was lost to the old tarweig-phase cleanup, which matched by stem and also took the AVI when the same-stem `.WMA` shipped. It was rebuilt as the original WMA audio over a still frame from الترمذي 65 and put back in the lane (`/opt/abuhafs/archive/سنن الترمذي/الترمذي 67.mp4`).
+  - **VPS caches cleared:** npm, pip, composer and Cypress, about 7 GB. huggingface (aligner models), ms-playwright (gemini_web, FB scripts) and chroma were kept.
