@@ -17,7 +17,6 @@ Usage: archive_ingest.py <zip path> [<zip name as referenced in the DB>]
 import json
 import shutil
 import sqlite3
-import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -31,8 +30,16 @@ def main():
     zp = Path(sys.argv[1])
     zip_name = sys.argv[2] if len(sys.argv) > 2 else zp.name
     extra = json.loads(sys.stdin.read() or "{}") if not sys.stdin.isatty() else {}
-    if subprocess.run(["unzip", "-tqq", str(zp)]).returncode != 0:
-        print(json.dumps({"ok": False, "error": "CRC test failed", "zip": zip_name}, ensure_ascii=False))
+    # zipfile, not `unzip -t`: unzip exits non-zero on harmless "mismatching local
+    # filename" warnings for the Arabic (UTF-8) member names written by Python
+    try:
+        with zipfile.ZipFile(zp) as z:
+            bad_member = z.testzip()
+    except zipfile.BadZipFile as e:
+        bad_member = f"unreadable zip: {e}"
+    if bad_member is not None:
+        print(json.dumps({"ok": False, "error": f"CRC test failed: {bad_member}", "zip": zip_name},
+                         ensure_ascii=False))
         return 1
     dest = ARCHIVE / Path(zip_name).stem
     dest.mkdir(parents=True, exist_ok=True)
