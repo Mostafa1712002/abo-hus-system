@@ -97,3 +97,4 @@ sync_existing_video.py
 sync_quotes_only.py
 fix_fb_existing.py
 docs/.~lock.*
+.claude-cli-home/
