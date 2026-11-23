@@ -57,7 +57,8 @@ except Exception:
 
 # ---- live pipeline + helpers (reused verbatim) ----------------------------
 from src.config import Config
-from src.ai_generator import GeminiGenerator, metadata_to_dict
+from src.ai_generator import (GeminiGenerator, metadata_to_dict, VideoMetadata, Chapter,
+                              ImportantClip, TelegramQuote)
 from src.shorts_cutter import cut_all_shorts
 from src.thumbnail import make_thumbnail
 from src.youtube_uploader import (
@@ -319,6 +320,30 @@ def _generate_via_web_fallback(gemini, cfg, *, with_ts, plain, duration):
     return md
 
 
+def load_cached_md(yt_id: str):
+    """Metadata prepared ahead of time by scripts/prefill_metadata.py, or None."""
+    p = SRT_CACHE / f"{yt_id}.meta.json"
+    if not p.exists():
+        return None
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+        return VideoMetadata(
+            title=d["title"], description=d["description"],
+            hashtags=d.get("hashtags") or [],
+            chapters=[Chapter(**c) for c in d.get("chapters") or []],
+            important_clips=[ImportantClip(**c) for c in d.get("important_clips") or []],
+            text_quotes=[TelegramQuote(**q) for q in d.get("text_quotes") or []],
+        )
+    except Exception as e:
+        log.warning("bad prepared metadata for %s (%s) - regenerating", yt_id, e)
+        return None
+
+
+def save_cached_md(yt_id: str, md) -> None:
+    (SRT_CACHE / f"{yt_id}.meta.json").write_text(
+        json.dumps(metadata_to_dict(md), ensure_ascii=False), encoding="utf-8")
+
+
 def _make_split_ask(gemini, *, allow_web=True):
     """Build the ``ask(prompt) -> dict`` callable used by ``generate_split``.
 
@@ -355,7 +380,7 @@ def _make_split_ask(gemini, *, allow_web=True):
     return ask
 
 
-def _generate_split(gemini, cfg, *, with_ts, plain, duration):
+def _generate_split(gemini, cfg, *, with_ts, plain, duration, allow_web=True):
     """Anti-truncation generator: run ``GeminiGenerator.generate_split`` with the
     3-sub-prompt splitting logic, using a per-sub-call ask that prefers the API
     and falls back to the Gemini WEB APP on rate-limit/empty.
@@ -363,7 +388,7 @@ def _generate_split(gemini, cfg, *, with_ts, plain, duration):
     Same VideoMetadata shape as ``_generate_with_retry``; the worker can use
     either. Raises only when the CORE call can't produce a title.
     """
-    ask = _make_split_ask(gemini)
+    ask = _make_split_ask(gemini, allow_web=allow_web)
     md = gemini.generate_split(
         ask,
         srt_text_with_timestamps=with_ts,
@@ -525,8 +550,10 @@ def process_video(cfg, youtube, gemini, row, dry_run=False) -> dict:
     # generate() itself only retries on key-rotation errors, so we retry the
     # whole call here until we get a usable result (clips OR quotes present),
     # keeping the best partial result as a fallback.
-    md = None
-    if has_srt:
+    md = load_cached_md(yt_id) if has_srt else None
+    if md is not None:
+        log.info("using prepared metadata for %s", yt_id)
+    elif has_srt:
         duration = P._get_duration_from_srt(srt_text)
         plain = P._srt_plain_text(srt_text)
         with_ts = P._srt_with_simple_timestamps(srt_text)
@@ -542,6 +569,9 @@ def process_video(cfg, youtube, gemini, row, dry_run=False) -> dict:
                         "single-call retry", str(e)[:160])
             md = _generate_with_retry(
                 gemini, cfg, with_ts=with_ts, plain=plain, duration=duration)
+        if md and md.title and not dry_run:
+            save_cached_md(yt_id, md)  # a failed upload won't pay for this again
+    if md is not None:
         # cap shorts at 3 (Gemini sometimes returns more); keeps quota ~6400/video
         _cap = cfg.shorts.get("max_clips_per_video", 3)
         if md and md.important_clips and len(md.important_clips) > _cap:
