@@ -7,7 +7,8 @@ Claude stops answering (usage limit). The scheduled catalog_full_worker runs
 then read the prepared file instead of calling any model.
 
 Nothing is uploaded here. Safe to re-run: prepared videos are skipped.
-Usage: prefill_metadata.py [--limit N]
+Usage: prefill_metadata.py [--limit N] [--shard K/N]
+Parallel: scripts/prefill_lanes.sh N runs N shards, each on its own slice of the list.
 """
 import argparse
 import sqlite3
@@ -24,7 +25,9 @@ log = W.log
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0, help="stop after N prepared videos")
+    ap.add_argument("--shard", default="0/1", help="K/N: take every N-th video starting at K")
     args = ap.parse_args()
+    k, n = (int(x) for x in args.shard.split("/"))
 
     cfg = W.Config(str(W.ROOT / "config.json"))
     gemini = W.GeminiGenerator(api_key=cfg.gemini_api_key,
@@ -38,7 +41,7 @@ def main() -> None:
     con.close()
 
     done = 0
-    for r in rows:
+    for r in rows[k::n]:
         yt = r["youtube_id"]
         if not yt or (W.SRT_CACHE / f"{yt}.meta.json").exists():
             continue
@@ -65,12 +68,12 @@ def main() -> None:
         if md and md.title:
             W.save_cached_md(yt, md)
             done += 1
-            log.info("prepared %s (%d) title=%r", yt, done, md.title[:60])
+            log.info("[%s] prepared %s (%d) title=%r", args.shard, yt, done, md.title[:60])
         else:
             log.warning("%s: no title, not saved", yt)
         if args.limit and done >= args.limit:
             break
-    print(f"prepared {done}")
+    print(f"[{args.shard}] prepared {done}")
 
 
 if __name__ == "__main__":
