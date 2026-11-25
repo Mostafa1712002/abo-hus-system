@@ -20,6 +20,16 @@ from .transcribe import Segment
 logger = logging.getLogger(__name__)
 
 
+def is_garbled_arabic(text: str) -> bool:
+    """True when Arabic text was mangled to '?' (e.g. read through a latin1 client).
+
+    Counts '?' against Arabic letters; a real SRT has far more letters than '?'.
+    """
+    q = text.count("?")
+    ar = sum(1 for ch in text if "\u0600" <= ch <= "\u06ff")
+    return q >= 10 and q > ar * 0.2
+
+
 def _check_ffmpeg() -> None:
     if shutil.which("ffmpeg") is None:
         raise RuntimeError(
@@ -71,6 +81,8 @@ def cut_clip(
 
     # subtitles burn-in
     if burn_subtitles and srt_path:
+        if is_garbled_arabic(Path(srt_path).read_text(encoding="utf-8", errors="replace")):
+            raise RuntimeError(f"caption text is garbled ('?' instead of Arabic): {srt_path}")
         sub_filter = None
         if word_level_captions:
             # Forced alignment on the known catalog text gives a true onset per word, so

@@ -59,7 +59,7 @@ except Exception:
 from src.config import Config
 from src.ai_generator import (GeminiGenerator, metadata_to_dict, VideoMetadata, Chapter,
                               ImportantClip, TelegramQuote)
-from src.shorts_cutter import cut_all_shorts
+from src.shorts_cutter import cut_all_shorts, is_garbled_arabic
 from src.thumbnail import make_thumbnail
 from src.youtube_uploader import (
     add_video_to_playlist,
@@ -104,7 +104,8 @@ QUOTA_PER_FULL = QUOTA_PER_UPLOAD * 2
 
 # Site catalog MySQL (subtitle_srt lives here; YouTube captions are blocked).
 # abuhafs.info moved to this box on 2026-10-01 - read the local database instead of tarweig.
-CATALOG_MYSQL = ["mysql", "--defaults-file=/root/.my.cnf", "abuhafs_info", "-N", "-e"]
+CATALOG_MYSQL = ["mysql", "--defaults-file=/root/.my.cnf", "--default-character-set=utf8mb4",
+                 "abuhafs_info", "-N", "-e"]
 CATALOG_QUERY = "SELECT subtitle_srt FROM videos WHERE video_id='{yt}' LIMIT 1;"
 
 logging.basicConfig(
@@ -147,7 +148,10 @@ def fetch_srt(yt_id: str) -> str:
     SRT_CACHE.mkdir(parents=True, exist_ok=True)
     cache = SRT_CACHE / f"{yt_id}.srt"
     if cache.exists() and cache.stat().st_size > 50:
-        return _normalize_srt(cache.read_text(encoding="utf-8", errors="replace"))
+        cached = cache.read_text(encoding="utf-8", errors="replace")
+        if not is_garbled_arabic(cached):
+            return _normalize_srt(cached)
+        log.warning("cached SRT for %s is garbled ('?'); refetching", yt_id)
     cmd = CATALOG_MYSQL + [CATALOG_QUERY.format(yt=yt_id)]
     try:
         out = subprocess.run(cmd, capture_output=True, timeout=120).stdout
@@ -163,6 +167,9 @@ def fetch_srt(yt_id: str) -> str:
     # sanity: an SRT has at least one "-->" timing line
     if "-->" not in text:
         log.warning("fetched text for %s has no SRT timings; ignoring", yt_id)
+        return ""
+    if is_garbled_arabic(text):
+        log.error("fetched SRT for %s is garbled ('?' instead of Arabic); ignoring", yt_id)
         return ""
     text = _normalize_srt(text)
     cache.write_text(text, encoding="utf-8")
